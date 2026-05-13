@@ -7,6 +7,9 @@ public:
   CodeBufferBase() {
   }
 
+  virtual ~CodeBufferBase() {
+  }
+
 public:
   virtual CodeBufferBase *Copy();
 

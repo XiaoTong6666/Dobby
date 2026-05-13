@@ -1,6 +1,18 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 project(Dobby)
 enable_language(ASM)
+
+if(POLICY CMP0069)
+  cmake_policy(SET CMP0069 NEW)
+endif()
+
+if(DEFINED API)
+  set(DOBBY_ANDROID_API "${API}")
+endif()
+
+if(DEFINED CORE_ROOT)
+  set(DOBBY_CORE_ROOT "${CORE_ROOT}")
+endif()
 
 include(cmake/Util.cmake)
 include(cmake/Macros.cmake)

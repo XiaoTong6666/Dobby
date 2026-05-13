@@ -11,14 +11,10 @@
 #include <vector>
 #include <algorithm>
 
-#define LINE_MAX 2048
+#define DOBBY_LINE_MAX 2048
 
 // ================================================================
 // GetProcessMemoryLayout
-
-static bool memory_region_comparator(MemRange a, MemRange b) {
-  return (a.start < b.start);
-}
 
 std::vector<MemRegion> regions;
 const std::vector<MemRegion> &ProcessRuntimeUtility::GetProcessMemoryLayout() {
@@ -29,11 +25,11 @@ const std::vector<MemRegion> &ProcessRuntimeUtility::GetProcessMemoryLayout() {
     return regions;
 
   while (!feof(fp)) {
-    char line_buffer[LINE_MAX + 1];
-    fgets(line_buffer, LINE_MAX, fp);
+    char line_buffer[DOBBY_LINE_MAX + 1];
+    fgets(line_buffer, DOBBY_LINE_MAX, fp);
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == LINE_MAX && line_buffer[LINE_MAX] != '\n') {
+    if (strlen(line_buffer) == DOBBY_LINE_MAX && line_buffer[DOBBY_LINE_MAX] != '\n') {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -115,11 +111,11 @@ static std::vector<RuntimeModule> &get_process_map_with_proc_maps() {
     return *modules;
 
   while (!feof(fp)) {
-    char line_buffer[LINE_MAX + 1];
-    fgets(line_buffer, LINE_MAX, fp);
+    char line_buffer[DOBBY_LINE_MAX + 1];
+    fgets(line_buffer, DOBBY_LINE_MAX, fp);
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == LINE_MAX && line_buffer[LINE_MAX] != '\n') {
+    if (strlen(line_buffer) == DOBBY_LINE_MAX && line_buffer[DOBBY_LINE_MAX] != '\n') {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -188,7 +184,7 @@ static std::vector<RuntimeModule> &get_process_map_with_proc_maps() {
   return *modules;
 }
 
-#if defined(__LP64__)
+#if defined(__LP64__) && 0
 static std::vector<RuntimeModule> get_process_map_with_linker_iterator() {
   std::vector<RuntimeModule> ProcessModuleMap;
 
@@ -200,7 +196,7 @@ static std::vector<RuntimeModule> get_process_map_with_linker_iterator() {
 
   dl_iterate_phdr_ptr(
       [](dl_phdr_info *info, size_t size, void *data) {
-        RuntimeModule module = {0};
+        RuntimeModule module = {};
         if (info->dlpi_name && info->dlpi_name[0] == '/')
           strcpy(module.path, info->dlpi_name);
 
@@ -240,5 +236,5 @@ RuntimeModule ProcessRuntimeUtility::GetProcessModule(const char *name) {
       return module;
     }
   }
-  return RuntimeModule{0};
+  return RuntimeModule{};
 }

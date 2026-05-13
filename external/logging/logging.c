@@ -37,7 +37,6 @@ static bool time_tag_enabled = false;
 static bool syslog_enabled = false;
 static bool file_log_enabled = false;
 static const char *log_file_path = NULL;
-static int log_file_fd = -1;
 static FILE *log_file_stream = NULL;
 
 PUBLIC void log_set_level(int level) {

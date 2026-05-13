@@ -35,7 +35,9 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
   // x86 ip register == next instruction
   curr_orig_ip = curr_orig_ip + insn.length;
 
+#if defined(DOBBY_DEBUG)
   int last_relo_offset = code_buffer->GetBufferSize();
+#endif
   if (insn.primary_opcode >= 0x70 && insn.primary_opcode <= 0x7F) { // jc rel8
     DLOG(0, "[x86 relo] %p: jc rel8", buffer_cursor);
 
@@ -164,11 +166,13 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
   }
 
   // insn -> relocated insn
+#if defined(DOBBY_DEBUG)
   {
     int relo_offset = code_buffer->GetBufferSize();
     int relo_len = relo_offset - last_relo_offset;
     DLOG(0, "insn -> relocated insn: %d -> %d", insn.length, relo_len);
   }
+#endif
   return relocated_insn_len;
 }
 

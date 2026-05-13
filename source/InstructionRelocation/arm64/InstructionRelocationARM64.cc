@@ -149,7 +149,9 @@ static inline bool inst_is_test_b(uint32_t instr) {
 // ---
 
 int relo_relocate(relo_ctx_t *ctx, bool branch) {
+#if defined(DOBBY_DEBUG)
   int relocated_insn_count = 0;
+#endif
 
   TurboAssembler turbo_assembler_(0);
 #define _ turbo_assembler_.

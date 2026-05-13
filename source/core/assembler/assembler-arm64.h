@@ -98,18 +98,18 @@ private:
 class MemOperand {
 public:
   inline explicit MemOperand(Register base, int64_t offset = 0, AddrMode addrmode = Offset)
-      : base_(base), regoffset_(InvalidRegister), offset_(offset), addrmode_(addrmode), shift_(NO_SHIFT),
-        extend_(NO_EXTEND), shift_extend_imm_(0) {
+      : base_(base), regoffset_(InvalidRegister), offset_(offset), shift_(NO_SHIFT), extend_(NO_EXTEND),
+        shift_extend_imm_(0), addrmode_(addrmode) {
   }
 
   inline explicit MemOperand(Register base, Register regoffset, Extend extend, unsigned extend_imm)
-      : base_(base), regoffset_(regoffset), offset_(0), addrmode_(Offset), shift_(NO_SHIFT), extend_(extend),
-        shift_extend_imm_(extend_imm) {
+      : base_(base), regoffset_(regoffset), offset_(0), shift_(NO_SHIFT), extend_(extend),
+        shift_extend_imm_(extend_imm), addrmode_(Offset) {
   }
 
   inline explicit MemOperand(Register base, Register regoffset, Shift shift = LSL, unsigned shift_imm = 0)
-      : base_(base), regoffset_(regoffset), offset_(0), addrmode_(Offset), shift_(shift), extend_(NO_EXTEND),
-        shift_extend_imm_(shift_imm) {
+      : base_(base), regoffset_(regoffset), offset_(0), shift_(shift), extend_(NO_EXTEND),
+        shift_extend_imm_(shift_imm), addrmode_(Offset) {
   }
 
   inline explicit MemOperand(Register base, const Operand &offset, AddrMode addrmode = Offset)
@@ -226,7 +226,7 @@ public:
     imms = bits(imm, 6, 11);
     N = bit(imm, 12);
 
-    return (sf(rd) | LeftShift(immr, 6, 16) | LeftShift(imms, 6, 10) | Rd(rd) | Rn(rn));
+    return (sf(rd) | LeftShift(N, 1, 22) | LeftShift(immr, 6, 16) | LeftShift(imms, 6, 10) | Rd(rd) | Rn(rn));
   }
 
   // LogicalShift
@@ -371,7 +371,7 @@ public:
       break;
     default:
       UNREACHABLE();
-      break;
+      return;
     }
     EmitLoadRegLiteral(op, rt, imm);
   }

@@ -44,7 +44,6 @@ int GenRelocateCodeFixed(void *buffer, CodeMemBlock *origin, CodeMemBlock *reloc
   // jmp to the origin rest instructions
   if (branch) {
   CodeGen codegen(&turbo_assembler_);
-  addr32_t stub_addr = curr_relo_ip + 6;
   codegen.JmpNear(curr_orig_ip);
   }
 

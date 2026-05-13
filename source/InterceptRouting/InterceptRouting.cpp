@@ -7,8 +7,12 @@ using namespace zz;
 
 void log_hex_format(uint8_t *buffer, uint32_t buffer_size) {
   char output[1024] = {0};
-  for (int i = 0; i < buffer_size && i < sizeof(output); i++) {
-    snprintf(output + strlen(output), 3, "%02x ", *((uint8_t *)buffer + i));
+  for (uint32_t i = 0; i < buffer_size; i++) {
+    size_t offset = strlen(output);
+    if (offset + 4 > sizeof(output)) {
+      break;
+    }
+    snprintf(output + offset, sizeof(output) - offset, "%02x ", buffer[i]);
   }
   DLOG(0, "%s", output);
 };

@@ -22,6 +22,8 @@ public:
   explicit constexpr Register(int code) : RegisterBase(code) {
   }
 
+  using RegisterBase::Is;
+
   static constexpr Register Create(int code) {
     return Register(code);
   }

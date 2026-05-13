@@ -21,7 +21,6 @@ public:
 
     for (auto &ref_label_inst : ref_label_insts_) {
       // instruction offset to label
-      thumb2_inst_t insn = _buffer->LoadThumb2Inst(ref_label_inst.offset_);
       thumb1_inst_t insn1 = _buffer->LoadThumb1Inst(ref_label_inst.offset_);
       thumb1_inst_t insn2 = _buffer->LoadThumb1Inst(ref_label_inst.offset_ + sizeof(thumb1_inst_t));
 
@@ -58,7 +57,7 @@ class ThumbRelocLabelEntry : public ThumbPseudoLabel, public RelocLabel {
 public:
   template <typename T>
   ThumbRelocLabelEntry(T value, bool is_pc_register)
-      : RelocLabel(value), ThumbPseudoLabel(), is_pc_register_(is_pc_register) {
+      : ThumbPseudoLabel(), RelocLabel(value), is_pc_register_(is_pc_register) {
   }
 
   bool is_pc_register() {
@@ -125,7 +124,6 @@ public:
 
 private:
   void EmitThumb2LoadLiteral(Register rt, const MemOperand x) {
-    bool add = true;
     uint32_t U, imm12;
     int32_t offset = x.offset();
 
@@ -156,9 +154,7 @@ private:
       return;
     }
 
-    bool index, add, wback;
     if (x.IsRegisterOffset() && x.offset() >= 0) {
-      index = true, add = true, wback = false;
       uint32_t imm12 = x.offset();
       EmitInt16(0xf8d0 | (x.rn().code() << 0));
       EmitInt16(0x0 | (rt.code() << 12) | imm12);
@@ -172,9 +168,6 @@ private:
       } else if (x.IsPreIndex()) {
         P = B10, W = B8;
       }
-      index = (P == B10);
-      add = (U == B9);
-      wback = (W == B8);
       EmitInt16(0xf850 | (x.rn().code() << 0));
       EmitInt16(0x0800 | (rt.code() << 12) | P | U | W | imm8);
     }
