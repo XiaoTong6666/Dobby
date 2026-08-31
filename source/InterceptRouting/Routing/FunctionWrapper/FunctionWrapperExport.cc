@@ -19,8 +19,10 @@ PUBLIC int DobbyWrap(void *function_address, PreCallTy pre_call, PostCallTy post
 
   FunctionWrapperRouting *routing = new FunctionWrapperRouting(entry);
   routing->DispatchRouting();
+  if (!routing->Commit()) {
+    return RS_FAILED;
+  }
   interceptor->addHookEntry(entry);
-  routing->Commit();
 
   DLOG(0, "Finalize %p", function_address);
   return RS_SUCCESS;

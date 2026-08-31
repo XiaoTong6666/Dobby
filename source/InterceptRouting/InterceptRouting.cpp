@@ -72,19 +72,20 @@ bool InterceptRouting::GenerateTrampolineBuffer(addr_t src, addr_t dst) {
 }
 
 // active routing, patch origin instructions as trampoline
-void InterceptRouting::Active() {
+bool InterceptRouting::Active() {
   MemoryOperationError err;
   err = DobbyCodePatch((void *)entry_->patched_addr, trampoline_buffer_->GetBuffer(),
                        trampoline_buffer_->GetBufferSize());
   if (err != kMemoryOperationSuccess) {
     ERROR_LOG("[intercept routing] active failed");
-    return;
+    return false;
   }
   DLOG(0, "[intercept routing] active");
+  return true;
 }
 
-void InterceptRouting::Commit() {
-  this->Active();
+bool InterceptRouting::Commit() {
+  return this->Active();
 }
 
 #if 0

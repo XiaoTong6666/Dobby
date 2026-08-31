@@ -43,7 +43,9 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
     *origin_func = (dobby_dummy_func_t)entry->relocated_addr;
   }
 
-  routing->Commit();
+  if (!routing->Commit()) {
+    return RS_FAILED;
+  }
 
   Interceptor::SharedInstance()->add(entry);
 

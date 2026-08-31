@@ -22,9 +22,9 @@ public:
 
   virtual void Prepare();
 
-  virtual void Active();
+  virtual bool Active();
 
-  void Commit();
+  bool Commit();
 
   InterceptEntry *GetInterceptEntry();
 
