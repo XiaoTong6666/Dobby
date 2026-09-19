@@ -22,7 +22,7 @@ public:
   FunctionWrapperRouting(InterceptEntry *entry) : InterceptRouting(entry) {
   }
 
-  void DispatchRouting();
+  bool DispatchRouting() override;
 
   void *GetTrampolineTarget();
 

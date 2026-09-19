@@ -68,7 +68,7 @@ bool InterceptRouting::GenerateTrampolineBuffer(addr_t src, addr_t dst) {
     auto tramp_buffer = GenerateNormalTrampolineBuffer(src, dst);
     SetTrampolineBuffer(tramp_buffer);
   }
-  return true;
+  return GetTrampolineBuffer() != nullptr;
 }
 
 // active routing, patch origin instructions as trampoline

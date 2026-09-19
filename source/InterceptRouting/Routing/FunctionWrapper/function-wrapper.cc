@@ -6,10 +6,11 @@
 
 #include "function-wrapper.h"
 
-void FunctionWrapperRouting::DispatchRouting() {
+bool FunctionWrapperRouting::DispatchRouting() {
   Prepare();
   BuildPreCallRouting();
   BuildPostCallRouting();
+  return true;
 }
 
 // Add pre_call(prologue) handler before running the origin function,

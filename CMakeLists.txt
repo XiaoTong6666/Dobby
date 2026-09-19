@@ -264,12 +264,20 @@ endif ()
 
 # ---
 
+if (PROCESSOR.AARCH64 OR NearBranch)
+  # ARM64 instruction relocation uses near executable memory for the
+  # register-transparent branch back to the original function. Keep the
+  # allocator available even when the optional near-branch routing plugin is
+  # disabled.
+  set(dobby.SOURCE_FILE_LIST ${dobby.SOURCE_FILE_LIST}
+    source/MemoryAllocator/NearMemoryAllocator.cc)
+endif ()
+
 if (NearBranch)
   message(STATUS "[Dobby] Enable near branch trampoline")
   set(dobby.SOURCE_FILE_LIST ${dobby.SOURCE_FILE_LIST}
     source/InterceptRouting/RoutingPlugin/NearBranchTrampoline/near_trampoline_arm64.cc
-    source/InterceptRouting/RoutingPlugin/NearBranchTrampoline/NearBranchTrampoline.cc
-    source/MemoryAllocator/NearMemoryAllocator.cc)
+    source/InterceptRouting/RoutingPlugin/NearBranchTrampoline/NearBranchTrampoline.cc)
 endif ()
 
 # ---

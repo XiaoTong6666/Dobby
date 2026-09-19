@@ -18,7 +18,7 @@ public:
     trampoline_target_ = 0;
   }
 
-  virtual void DispatchRouting() = 0;
+  virtual bool DispatchRouting() = 0;
 
   virtual void Prepare();
 

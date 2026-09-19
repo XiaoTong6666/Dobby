@@ -1,7 +1,7 @@
 #include "dobby_internal.h"
 #include "InterceptRouting/Routing/FunctionInlineHook/FunctionInlineHookRouting.h"
 
-void FunctionInlineHookRouting::BuildRouting() {
+bool FunctionInlineHookRouting::BuildRouting() {
   SetTrampolineTarget((addr_t)replace_func);
 
   // generate trampoline buffer, run before GenerateRelocatedCode
@@ -11,12 +11,12 @@ void FunctionInlineHookRouting::BuildRouting() {
     from += 1;
 #endif
   addr_t to = GetTrampolineTarget();
-  GenerateTrampolineBuffer(from, to);
+  return GenerateTrampolineBuffer(from, to);
 }
 
-void FunctionInlineHookRouting::DispatchRouting() {
-  BuildRouting();
+bool FunctionInlineHookRouting::DispatchRouting() {
+  if (!BuildRouting()) return false;
 
   // generate relocated code which size == trampoline size
-  GenerateRelocatedCode();
+  return GenerateRelocatedCode();
 }

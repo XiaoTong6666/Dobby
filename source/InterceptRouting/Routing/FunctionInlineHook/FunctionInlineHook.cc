@@ -4,6 +4,9 @@
 #include "InterceptRouting/Routing/FunctionInlineHook/FunctionInlineHookRouting.h"
 
 PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func) {
+  if (origin_func) {
+    *origin_func = nullptr;
+  }
   if (!address) {
     ERROR_LOG("function address is 0x0");
     return RS_FAILED;
@@ -36,7 +39,9 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
 
   auto *routing = new FunctionInlineHookRouting(entry, replace_func);
   routing->Prepare();
-  routing->DispatchRouting();
+  if (!routing->DispatchRouting()) {
+    return RS_FAILED;
+  }
 
   // set origin func entry with as relocated instructions
   if (origin_func) {

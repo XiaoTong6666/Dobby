@@ -9,11 +9,18 @@
 #include "core/arch/arm64/registers-arm64.h"
 #include "core/assembler/assembler-arm64.h"
 #include "core/codegen/codegen-arm64.h"
+#include "MemoryAllocator/NearMemoryAllocator.h"
 
 #include "inst_constants.h"
 #include "inst_decode_encode_kit.h"
 
 using namespace zz::arm64;
+
+namespace {
+
+constexpr int64_t kArm64DirectBranchRange = INT64_C(1) << 27;
+
+} // namespace
 
 #if defined(DOBBY_DEBUG)
 #define debug_nop() _ nop()
@@ -328,18 +335,56 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
   int new_origin_len = (addr_t)ctx->buffer_cursor - (addr_t)ctx->buffer;
   ctx->origin->reset(ctx->origin->addr, new_origin_len);
 
+  uint32_t tail_branch_offset = 0;
   // TODO: if last instr is unlink branch, ignore it
   if (branch) {
-    CodeGen codegen(&turbo_assembler_);
-    codegen.LiteralLdrBranch(ctx->origin->addr + ctx->origin->size);
+    // A transparent original-function trampoline must not consume an
+    // architectural scratch register at the relocation boundary. In
+    // particular, x17 is a normal Dart generated-code temporary and can carry
+    // a live value from the final relocated instruction into the first
+    // instruction after the stolen prologue. The historical
+    // LiteralLdrBranch() tail used x17 for an absolute jump and silently
+    // destroyed that value.
+    //
+    // Reserve the tail instruction first. After literal labels are bound we
+    // know the exact relocated size and can allocate only that much memory.
+    tail_branch_offset = relocated_buffer->GetBufferSize();
+    turbo_assembler_.b(static_cast<int64_t>(0));
   }
 
   // Bind all labels
   turbo_assembler_.RelocBind();
 
+  if (branch) {
+    const uint32_t relocated_size = relocated_buffer->GetBufferSize();
+    const addr_t resume = ctx->origin->addr + ctx->origin->size;
+    const addr_t preferred_start = resume - tail_branch_offset;
+    auto *near_code = NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(
+        relocated_size, preferred_start, kArm64DirectBranchRange - sizeof(arm64_inst_t));
+    if (near_code == nullptr) {
+      ERROR_LOG("[insn relocate] failed to allocate ARM64 original trampoline near %p",
+                ctx->origin->addr);
+      return -1;
+    }
+    ctx->dst_vmaddr = reinterpret_cast<addr_t>(near_code);
+    turbo_assembler_.SetRealizedAddress(near_code);
+
+    const addr_t branch_pc = ctx->dst_vmaddr + tail_branch_offset;
+    const int64_t delta = static_cast<int64_t>(resume) - static_cast<int64_t>(branch_pc);
+    if ((delta & 3) != 0 || delta < -kArm64DirectBranchRange ||
+        delta >= kArm64DirectBranchRange) {
+      ERROR_LOG("[insn relocate] ARM64 original trampoline is outside direct branch reach");
+      return -1;
+    }
+
+    const arm64_inst_t tail_branch = B | bits(delta >> 2, 0, 25);
+    relocated_buffer->RewriteInst(tail_branch_offset, tail_branch);
+  }
+
   // Generate executable code
   {
     auto code = AssemblyCodeBuilder::FinalizeFromTurboAssembler(&turbo_assembler_);
+    if (code == nullptr) return -1;
     ctx->relocated = code;
   }
   return 0;
@@ -356,7 +401,10 @@ void GenRelocateCode(void *buffer, CodeMemBlock *origin, CodeMemBlock *relocated
 
   ctx.origin = origin;
 
-  relo_relocate(&ctx, branch);
+  if (relo_relocate(&ctx, branch) != 0 || ctx.relocated == nullptr) {
+    relocated->reset(0, 0);
+    return;
+  }
 
   relocated->reset(ctx.relocated->addr, ctx.relocated->size);
 }

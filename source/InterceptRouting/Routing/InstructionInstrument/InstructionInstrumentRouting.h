@@ -16,10 +16,10 @@ public:
     this->post_handler = post_handler;
   }
 
-  void DispatchRouting() override;
+  bool DispatchRouting() override;
 
 private:
-  void BuildRouting();
+  bool BuildRouting();
 
 public:
   dobby_instrument_callback_t pre_handler;

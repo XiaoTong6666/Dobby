@@ -7,7 +7,7 @@
 #include "InterceptRouting/Routing/InstructionInstrument/instrument_routing_handler.h"
 
 // create closure trampoline jump to prologue_routing_dispatch with the `entry_` data
-void InstructionInstrumentRouting::BuildRouting() {
+bool InstructionInstrumentRouting::BuildRouting() {
   void *handler = (void *)instrument_routing_dispatch;
 #if defined(__APPLE__) && defined(__arm64__)
 #if __has_feature(ptrauth_calls)
@@ -25,14 +25,14 @@ void InstructionInstrumentRouting::BuildRouting() {
     from += 1;
 #endif
   addr_t to = GetTrampolineTarget();
-  GenerateTrampolineBuffer(from, to);
+  return GenerateTrampolineBuffer(from, to);
 }
 
-void InstructionInstrumentRouting::DispatchRouting() {
-  BuildRouting();
+bool InstructionInstrumentRouting::DispatchRouting() {
+  if (!BuildRouting()) return false;
 
   // generate relocated code which size == trampoline size
-  GenerateRelocatedCode();
+  return GenerateRelocatedCode();
 }
 
 #if 0

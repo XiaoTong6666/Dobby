@@ -12,10 +12,10 @@ public:
     this->replace_func = replace_func;
   }
 
-  void DispatchRouting() override;
+  bool DispatchRouting() override;
 
 private:
-  void BuildRouting();
+  bool BuildRouting();
 
 private:
   dobby_dummy_func_t replace_func;

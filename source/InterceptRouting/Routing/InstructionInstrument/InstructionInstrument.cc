@@ -35,7 +35,9 @@ PUBLIC int DobbyInstrument(void *address, dobby_instrument_callback_t pre_handle
 
   auto routing = new InstructionInstrumentRouting(entry, pre_handler, nullptr);
   routing->Prepare();
-  routing->DispatchRouting();
+  if (!routing->DispatchRouting()) {
+    return RS_FAILED;
+  }
   if (!routing->Commit()) {
     return RS_FAILED;
   }
