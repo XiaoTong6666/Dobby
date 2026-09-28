@@ -19,7 +19,9 @@ typedef enum {
   kMemoryOperationError,
   kNotSupportAllocateExecutableMemory,
   kNotEnough,
-  kNone
+  kNone,
+  kInstructionSyncUnavailable,
+  kInstructionSyncFailed
 } MemoryOperationError;
 
 typedef uintptr_t addr_t;
@@ -151,6 +153,63 @@ int DobbyWrap(void *function_address, PreCallTy pre_call, PostCallTy post_call);
 
 // function inline hook
 int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func);
+
+// V1 transaction API. A handle is a monotonically assigned process-local ID,
+// not a pointer: stale IDs never alias another hook after Abort/Destroy.
+// Prepared hooks reserve their target without modifying its original entry.
+// Publish the returned backup before Commit makes replacement reachable.
+#define DOBBY_HOOK_TRANSACTION_API_VERSION 1
+typedef uint64_t DobbyHookHandle;
+typedef enum {
+  DOBBY_BRANCH_LEGACY = 0,
+  DOBBY_BRANCH_PREFER_NEAR = 1,
+  DOBBY_BRANCH_REQUIRE_NEAR = 2,
+  DOBBY_BRANCH_FORCE_LONG = 3
+} DobbyHookBranchPolicy;
+typedef enum {
+  DOBBY_HOOK_OK = 0,
+  DOBBY_HOOK_INVALID_ARGUMENT,
+  DOBBY_HOOK_TARGET_BUSY,
+  DOBBY_HOOK_NEAR_UNAVAILABLE,
+  DOBBY_HOOK_RELOCATION_FAILED,
+  DOBBY_HOOK_CONCURRENCY_UNSUPPORTED,
+  DOBBY_HOOK_SYNC_UNAVAILABLE,
+  DOBBY_HOOK_SYNC_FAILED,
+  DOBBY_HOOK_PATCH_FAILED,
+  DOBBY_HOOK_RECOVERY_REQUIRED,
+  DOBBY_HOOK_INVALID_HANDLE,
+  DOBBY_HOOK_INVALID_STATE,
+  DOBBY_HOOK_TARGET_CHANGED
+} DobbyHookStatus;
+enum { DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE = 1u };
+typedef struct {
+  uint32_t struct_size;
+  uint32_t branch_policy;
+  uint32_t flags;
+  uint32_t reserved;
+  void *target;
+  dobby_dummy_func_t replacement;
+} DobbyHookOptions;
+typedef struct {
+  uint32_t struct_size;
+  uint32_t status; // DobbyHookStatus
+  uint32_t cause;  // original failure when status == RECOVERY_REQUIRED
+  uint32_t reserved;
+  uint32_t patch_size;         // physical entry bytes chosen by the planner
+  uint32_t selected_branch;    // actual near/long routing, not the preference
+  DobbyHookHandle handle;      // nonzero only while the transaction is owned
+  dobby_dummy_func_t original; // callable after successful Prepare
+  uint8_t target_may_be_patched;
+  uint8_t restored_and_synchronized;
+  uint8_t ever_published; // a branch may have been fetched before rollback
+  uint8_t reserved_bytes[5];
+} DobbyHookResult;
+
+int DobbyPrepareHook(const DobbyHookOptions *options, DobbyHookResult *result);
+int DobbyCommitHook(DobbyHookHandle handle, DobbyHookResult *result);
+int DobbyAbortHook(DobbyHookHandle handle, DobbyHookResult *result);
+int DobbyRecoverHook(DobbyHookHandle handle, DobbyHookResult *result);
+int DobbyDestroyHook(DobbyHookHandle handle, DobbyHookResult *result);
 
 // dynamic binary instruction instrument
 // [!!! READ ME !!!]

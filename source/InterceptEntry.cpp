@@ -4,6 +4,7 @@
 
 InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   this->id = 0;
+  this->transaction_id = 0;
   this->type = type;
   this->routing = nullptr;
   this->state = InterceptEntryState::Installing;
@@ -13,6 +14,8 @@ InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   memset(this->origin_insns, 0, sizeof(this->origin_insns));
   this->origin_insn_size = 0;
   this->thumb_mode = false;
+  this->branch_policy = DOBBY_BRANCH_LEGACY;
+  this->hook_flags = 0;
 
 #if defined(TARGET_ARCH_ARM)
   if (address % 2) {

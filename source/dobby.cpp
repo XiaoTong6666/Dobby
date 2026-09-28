@@ -26,7 +26,10 @@ PUBLIC int DobbyDestroy(void *address) {
     entry->state = InterceptEntryState::Removing;
     uint8_t *buffer = entry->origin_insns;
     uint32_t buffer_size = entry->origin_insn_size;
-    if (DobbyCodePatch(address, buffer, buffer_size) != kMemoryOperationSuccess) {
+    const auto patch_error = DobbyCodePatch(address, buffer, buffer_size);
+    if (entry->routing)
+      entry->routing->RecordPatchError(patch_error);
+    if (patch_error != kMemoryOperationSuccess) {
       entry->state = prior_state;
       return RT_FAILED;
     }

@@ -35,6 +35,16 @@ public:
 
   bool Commit();
 
+  bool NearBranchUnavailable() const {
+    return near_branch_unavailable_;
+  }
+  MemoryOperationError LastPatchError() const {
+    return last_patch_error_;
+  }
+  void RecordPatchError(MemoryOperationError error) {
+    last_patch_error_ = error;
+  }
+
   InterceptEntry *GetInterceptEntry();
 
   void SetTrampolineBuffer(CodeBufferBase *buffer) {
@@ -68,4 +78,6 @@ protected:
   // trampoline buffer before active
   CodeBufferBase *trampoline_buffer_;
   addr_t trampoline_target_;
+  bool near_branch_unavailable_ = false;
+  MemoryOperationError last_patch_error_ = kMemoryOperationSuccess;
 };

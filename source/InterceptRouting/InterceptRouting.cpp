@@ -78,17 +78,38 @@ bool InterceptRouting::GenerateRelocatedCode() {
 }
 
 bool InterceptRouting::GenerateTrampolineBuffer(addr_t src, addr_t dst) {
+  // Explicit policies operate on this routing only. They must not mutate the
+  // process-wide legacy plugin or its require-near setting.
+  if (entry_->branch_policy != DOBBY_BRANCH_LEGACY) {
+    if (entry_->branch_policy != DOBBY_BRANCH_FORCE_LONG) {
+#if defined(TARGET_ARCH_ARM64) && defined(DOBBY_HAS_NEAR_BRANCH_TRAMPOLINE)
+      NearBranchTrampolinePlugin near_plugin;
+      if (static_cast<RoutingPluginInterface &>(near_plugin).GenerateTrampolineBuffer(this, src, dst))
+        return true;
+#endif
+      if (entry_->branch_policy == DOBBY_BRANCH_REQUIRE_NEAR) {
+        near_branch_unavailable_ = true;
+        return false;
+      }
+    }
+    SetTrampolineBuffer(GenerateNormalTrampolineBuffer(src, dst));
+    return GetTrampolineBuffer() != nullptr;
+  }
   // if near branch trampoline plugin enabled
   if (RoutingPluginManager::near_branch_trampoline) {
     auto plugin = static_cast<RoutingPluginInterface *>(RoutingPluginManager::near_branch_trampoline);
     if (plugin->GenerateTrampolineBuffer(this, src, dst) == false) {
       DLOG(0, "Failed enable near branch trampoline plugin");
-      if (NearBranchTrampolineRequired())
+      if (NearBranchTrampolineRequired()) {
+        near_branch_unavailable_ = true;
         return false;
+      }
     }
   }
-  if (!RoutingPluginManager::near_branch_trampoline && NearBranchTrampolineRequired())
+  if (!RoutingPluginManager::near_branch_trampoline && NearBranchTrampolineRequired()) {
+    near_branch_unavailable_ = true;
     return false;
+  }
 
   if (GetTrampolineBuffer() == nullptr) {
     auto tramp_buffer = GenerateNormalTrampolineBuffer(src, dst);
@@ -99,10 +120,9 @@ bool InterceptRouting::GenerateTrampolineBuffer(addr_t src, addr_t dst) {
 
 // active routing, patch origin instructions as trampoline
 bool InterceptRouting::Active() {
-  MemoryOperationError err;
-  err = DobbyCodePatch((void *)entry_->patched_addr, trampoline_buffer_->GetBuffer(),
-                       trampoline_buffer_->GetBufferSize());
-  if (err != kMemoryOperationSuccess) {
+  last_patch_error_ = DobbyCodePatch((void *)entry_->patched_addr, trampoline_buffer_->GetBuffer(),
+                                     trampoline_buffer_->GetBufferSize());
+  if (last_patch_error_ != kMemoryOperationSuccess) {
     ERROR_LOG("[intercept routing] active failed");
     return false;
   }

@@ -10,6 +10,7 @@ enum class InterceptEntryState { Installing, Active, Removing };
 
 typedef struct InterceptEntry {
   uint32_t id;
+  uint64_t transaction_id;
   InterceptEntryType type;
   InterceptRouting *routing;
   InterceptEntryState state;
@@ -27,6 +28,8 @@ typedef struct InterceptEntry {
   uint32_t origin_insn_size;
 
   bool thumb_mode;
+  uint32_t branch_policy; // DobbyHookBranchPolicy, per target
+  uint32_t hook_flags;
 
   InterceptEntry(InterceptEntryType type, addr_t address);
   ~InterceptEntry();

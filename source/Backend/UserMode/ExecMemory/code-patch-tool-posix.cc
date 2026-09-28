@@ -32,8 +32,12 @@ static int ProtectPage(void *page, size_t size, int permission) {
 // Comparing restored bytes alone cannot prove that other CPU pipelines have
 // stopped executing a previously installed branch.
 static thread_local bool g_last_patch_failure_synchronized = true;
+static thread_local bool g_last_patch_ever_published = false;
 bool DobbyLastPatchFailureWasSynchronized() {
   return g_last_patch_failure_synchronized;
+}
+bool DobbyLastPatchWasPublished() {
+  return g_last_patch_ever_published;
 }
 
 // __clear_cache cleans/invalidates instruction and data caches, but its ISB
@@ -53,6 +57,12 @@ static bool RegisterProcessInstructionSync() {
   return true;
 #endif
 }
+
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+bool DobbyEnsureInstructionSync() {
+  return RegisterProcessInstructionSync();
+}
+#endif
 
 static bool SynchronizeProcessInstructionStreams() {
 #if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
@@ -93,6 +103,7 @@ static bool GetOriginalProtections(uintptr_t first, uintptr_t last, size_t page_
 PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint32_t buffer_size) {
 #if defined(__ANDROID__) || defined(__linux__)
   g_last_patch_failure_synchronized = true;
+  g_last_patch_ever_published = false;
   if (address == nullptr || buffer == nullptr || buffer_size == 0) {
     return kMemoryOperationError;
   }
@@ -143,9 +154,9 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     release_scratch();
     return kMemoryOperationError;
   }
-  if (!RegisterProcessInstructionSync()) {
+  if (!DobbyEnsureInstructionSync()) {
     release_scratch();
-    return kMemoryOperationError;
+    return kInstructionSyncUnavailable;
   }
 
   // Protect every page before copying. Only changing first and last pages
@@ -164,6 +175,10 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
 
   // patch buffer
   memcpy(original, address, buffer_size);
+  // Conservatively mark publication *before* the first instruction byte is
+  // written. A signal or fault between the store and a later marker must
+  // never misclassify a possibly fetched branch as never-published.
+  g_last_patch_ever_published = true;
 #if defined(__aarch64__)
   // A near trampoline is one aligned A64 instruction. Install it with a
   // single store, rather than letting a generic memcpy expose torn bytes to
@@ -192,11 +207,13 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     }
   }
 
+  bool synchronization_failed = false;
   if (!restore_failed) {
     ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
     // A completed cache flush is not by itself a synchronization point for
     // the execution pipelines of the other cores in the process.
     restore_failed = !SynchronizeProcessInstructionStreams();
+    synchronization_failed = restore_failed;
     if (!restore_failed)
       g_last_patch_failure_synchronized = true;
   }
@@ -233,7 +250,8 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     g_last_patch_failure_synchronized = rollback_synchronized && permissions_restored;
   }
   release_scratch();
-  return restore_failed ? kMemoryOperationError : kMemoryOperationSuccess;
+  return restore_failed ? (synchronization_failed ? kInstructionSyncFailed : kMemoryOperationError)
+                        : kMemoryOperationSuccess;
 #else
   return kMemoryOperationSuccess;
 #endif
