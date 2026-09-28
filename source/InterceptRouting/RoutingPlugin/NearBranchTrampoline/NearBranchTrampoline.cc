@@ -5,16 +5,35 @@
 #include "MemoryAllocator/NearMemoryAllocator.h"
 
 #include "InterceptRouting/RoutingPlugin/RoutingPlugin.h"
+#include "Interceptor.h"
 
 using namespace zz;
+static bool g_near_trampoline_required = false;
+
+bool NearBranchTrampolineRequired() {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  return g_near_trampoline_required;
+}
+
+PUBLIC void dobby_require_near_branch_trampoline(bool required) {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  g_near_trampoline_required = required;
+  if (required)
+    dobby_enable_near_branch_trampoline();
+}
 
 PUBLIC void dobby_enable_near_branch_trampoline() {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  if (RoutingPluginManager::near_branch_trampoline)
+    return;
   RoutingPluginInterface *plugin = new NearBranchTrampolinePlugin;
   RoutingPluginManager::registerPlugin("near_branch_trampoline", plugin);
   RoutingPluginManager::near_branch_trampoline = plugin;
 }
 
 PUBLIC void dobby_disable_near_branch_trampoline() {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  g_near_trampoline_required = false;
   NearBranchTrampolinePlugin *plugin = (NearBranchTrampolinePlugin *)RoutingPluginManager::near_branch_trampoline;
   delete plugin;
   RoutingPluginManager::near_branch_trampoline = NULL;

@@ -10,6 +10,7 @@
 #include "core/assembler/assembler-arm64.h"
 #include "core/codegen/codegen-arm64.h"
 #include "MemoryAllocator/NearMemoryAllocator.h"
+#include "PlatformUtil/ProcessRuntimeUtility.h"
 
 #include "inst_constants.h"
 #include "inst_decode_encode_kit.h"
@@ -61,7 +62,18 @@ struct LiteralLoadFixup {
   uint32_t offset;
   addr_t target;
   arm64_inst_t instruction;
+  uint32_t data_offset;
+  bool copied;
 };
+
+// Literal loads can address 4, 8 or 16 bytes; PRFM does not load data.
+static size_t literal_data_size(arm64_inst_t inst) {
+  const unsigned opc = bits(inst, 30, 31);
+  const bool simd = bit(inst, 26) != 0;
+  if (simd)
+    return opc == 3 ? 0 : (size_t{4} << opc);
+  return opc == 0 || opc == 2 ? 4 : (opc == 1 ? 8 : 0);
+}
 
 // ---
 
@@ -195,6 +207,23 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 #endif
 
     arm64_inst_t inst = *(arm64_inst_t *)ctx->buffer_cursor;
+    // The stolen prologue may contain an inline literal pool following RET.
+    // Its payload can coincidentally decode as a branch or another literal;
+    // these words are data, not additional instructions to relocate.
+    bool embedded_literal_data = false;
+    for (const auto &literal : literal_loads) {
+      const size_t width = literal_data_size(literal.instruction);
+      const addr_t word = ctx->src_vmaddr + orig_off;
+      if (width && word >= literal.target && word - literal.target < width) {
+        embedded_literal_data = true;
+        break;
+      }
+    }
+    if (embedded_literal_data) {
+      _ Emit(inst);
+      ctx->buffer_cursor += sizeof(arm64_inst_t);
+      continue;
+    }
     if (inst_is_b_bl(inst)) {
       DLOG(0, "%d:relo <b_bl> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
 
@@ -219,7 +248,7 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
       // register and SIMD/PRFM variant. Rebase its PC-relative immediate after
       // locating the executable buffer. Replacing it with MOV+LDR would change
       // a destination register *before* a possible memory fault.
-      literal_loads.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, inst});
+      literal_loads.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, inst, 0, false});
       _ Emit(inst);
     } else if (inst_is_adr(inst)) {
       DLOG(0, "%d:relo <adr> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
@@ -341,6 +370,54 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
     turbo_assembler_.b(static_cast<int64_t>(0));
   }
 
+  // A literal within the stolen entry will be overwritten by the inline
+  // trampoline. Preserve its original bytes separately in the relocated
+  // buffer, after the return branch, and retarget the load to that copy.
+  // A non-branching relocation needs its own skip branch around the data.
+  const addr_t source_begin = ctx->origin->addr;
+  const addr_t source_end = source_begin + ctx->origin->size;
+  uint32_t data_skip_offset = 0;
+  bool appended_skip = false;
+  for (auto &fixup : literal_loads) {
+    const size_t width = literal_data_size(fixup.instruction);
+    if (fixup.target >= source_begin && fixup.target < source_end) {
+      if (width == 0 || width > 16 || fixup.target > UINTPTR_MAX - width) {
+        ERROR_LOG("[insn relocate] partial inline ARM64 literal: instruction=%08x target=%p size=%zu source=[%p,%p)",
+                  fixup.instruction, fixup.target, width, source_begin, source_end);
+        return -1;
+      }
+      // A literal can straddle the overwritten entry's end (e.g. a 12-byte
+      // patch overwriting the first four bytes of an 8-byte literal). Copy
+      // the *whole* datum before installing the patch, but only if the entire
+      // source memory range is currently readable.
+      const addr_t host_literal = (addr_t)ctx->buffer + (fixup.target - source_begin);
+      bool readable = false;
+      for (const auto &region : ProcessRuntimeUtility::GetProcessMemoryLayout()) {
+        if (region.start <= host_literal && host_literal < region.end && region.end - host_literal >= width &&
+            region.permission != kNoAccess) {
+          readable = true;
+          break;
+        }
+      }
+      if (!readable)
+        return -1;
+      if (!branch && !appended_skip) {
+        data_skip_offset = relocated_buffer->GetBufferSize();
+        relocated_buffer->Emit32(B);
+        appended_skip = true;
+      }
+      while (relocated_buffer->GetBufferSize() % width)
+        relocated_buffer->Emit8(0);
+      fixup.data_offset = relocated_buffer->GetBufferSize();
+      fixup.copied = true;
+      relocated_buffer->EmitBuffer(ctx->buffer + (fixup.target - source_begin), width);
+    }
+  }
+  if (appended_skip) {
+    const uint32_t delta = relocated_buffer->GetBufferSize() - data_skip_offset;
+    relocated_buffer->RewriteInst(data_skip_offset, B | bits(delta >> 2, 0, 25));
+  }
+
   // Bind all labels
   turbo_assembler_.RelocBind();
 
@@ -413,7 +490,8 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 
   for (const auto &fixup : literal_loads) {
     const addr_t load_pc = ctx->dst_vmaddr + fixup.offset;
-    const int64_t delta = static_cast<int64_t>(fixup.target) - static_cast<int64_t>(load_pc);
+    const addr_t data_target = fixup.copied ? ctx->dst_vmaddr + fixup.data_offset : fixup.target;
+    const int64_t delta = static_cast<int64_t>(data_target) - static_cast<int64_t>(load_pc);
     if ((delta & 3) != 0 || delta < -(INT64_C(1) << 20) || delta >= (INT64_C(1) << 20)) {
       ERROR_LOG("[insn relocate] ARM64 literal load outside reach: %p -> %p", load_pc, fixup.target);
       return -1;

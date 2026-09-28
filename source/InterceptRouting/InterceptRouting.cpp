@@ -2,6 +2,7 @@
 
 #include "InterceptRouting/InterceptRouting.h"
 #include "InterceptRouting/RoutingPlugin/RoutingPlugin.h"
+#include "InterceptRouting/RoutingPlugin/NearBranchTrampoline/NearBranchTrampoline.h"
 
 using namespace zz;
 
@@ -37,6 +38,10 @@ bool InterceptRouting::GenerateRelocatedCode() {
     ERROR_LOG("[insn relocate]] failed");
     return false;
   }
+  if (origin_->size > sizeof(entry_->origin_insns)) {
+    ERROR_LOG("[insn relocate] stolen prologue exceeds backup capacity");
+    return false;
+  }
 
   // set the relocated instruction address
   entry_->relocated_addr = relocated_->addr;
@@ -61,8 +66,12 @@ bool InterceptRouting::GenerateTrampolineBuffer(addr_t src, addr_t dst) {
     auto plugin = static_cast<RoutingPluginInterface *>(RoutingPluginManager::near_branch_trampoline);
     if (plugin->GenerateTrampolineBuffer(this, src, dst) == false) {
       DLOG(0, "Failed enable near branch trampoline plugin");
+      if (NearBranchTrampolineRequired())
+        return false;
     }
   }
+  if (!RoutingPluginManager::near_branch_trampoline && NearBranchTrampolineRequired())
+    return false;
 
   if (GetTrampolineBuffer() == nullptr) {
     auto tramp_buffer = GenerateNormalTrampolineBuffer(src, dst);

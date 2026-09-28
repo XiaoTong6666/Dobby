@@ -3,6 +3,7 @@
 #include "dobby_internal.h"
 
 #include "PlatformUtil/ProcessRuntimeUtility.h"
+#include "Interceptor.h"
 
 using namespace zz;
 
@@ -37,16 +38,14 @@ static const void *memmem(const void *haystack, size_t haystacklen, const void *
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 
-NearMemoryAllocator *NearMemoryAllocator::shared_allocator = nullptr;
 NearMemoryAllocator *NearMemoryAllocator::SharedAllocator() {
-  if (NearMemoryAllocator::shared_allocator == nullptr) {
-    NearMemoryAllocator::shared_allocator = new NearMemoryAllocator();
-  }
-  return NearMemoryAllocator::shared_allocator;
+  static NearMemoryAllocator allocator;
+  return &allocator;
 }
 
 MemBlock *NearMemoryAllocator::allocateNearBlockFromDefaultAllocator(uint32_t size, addr_t pos, size_t search_range,
                                                                      bool executable) {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
   addr_t min_valid_addr, max_valid_addr;
   min_valid_addr = pos - search_range;
   max_valid_addr = pos + search_range;
@@ -61,7 +60,9 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromDefaultAllocator(uint32_t si
 
     unused_mem_start = max(unused_mem_start, min_valid_addr);
     unused_mem_end = min(unused_mem_end, max_valid_addr);
-    
+    if (executable)
+      unused_mem_start = ALIGN_CEIL(unused_mem_start, 4);
+
     // check if invalid
     if(unused_mem_start >= unused_mem_end)
       return 0;
@@ -91,7 +92,7 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromDefaultAllocator(uint32_t si
       arena = *iter;
       unused_mem = allocateFromDefaultArena(arena, size);
       if (unused_mem)
-        continue;
+        break;
     }
   }
   
@@ -101,8 +102,8 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromDefaultAllocator(uint32_t si
   // skip placeholder block
   // FIXME: allocate the placeholder but mark it as freed
   auto placeholder_block_size = unused_mem - arena->cursor_addr;
-  arena->allocMemBlock(placeholder_block_size);
-  
+  if (placeholder_block_size)
+    delete arena->allocMemBlock(placeholder_block_size);
 
   auto block = arena->allocMemBlock(size);
   return block;
@@ -110,6 +111,7 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromDefaultAllocator(uint32_t si
 
 MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, addr_t pos, size_t search_range,
                                                                  bool executable) {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
 
   addr_t min_valid_addr, max_valid_addr;
   min_valid_addr = pos - search_range;
@@ -124,10 +126,11 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
       return 0;
 
     // align
-    unused_mem_start = ALIGN_FLOOR(unused_mem_start, 4);
+    unused_mem_start = ALIGN_CEIL(unused_mem_start, OSMemory::PageSize());
 
     unused_mem_start = max(unused_mem_start, min_valid_addr);
     unused_mem_end = min(unused_mem_end, max_valid_addr);
+    unused_mem_start = ALIGN_CEIL(unused_mem_start, OSMemory::PageSize());
 
     // check if invalid
     if (unused_mem_start >= unused_mem_end)
@@ -154,11 +157,11 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
     return nullptr;
 
   auto unused_arena_first_page_addr = (addr_t)ALIGN_FLOOR(unused_mem, OSMemory::PageSize());
-  auto unused_arena_end_page_addr = ALIGN_FLOOR(unused_mem + size, OSMemory::PageSize());
-  auto unused_arena_size = unused_arena_end_page_addr - unused_arena_first_page_addr + OSMemory::PageSize();
+  auto unused_arena_end_page_addr = ALIGN_CEIL(unused_mem + size, OSMemory::PageSize());
+  auto unused_arena_size = unused_arena_end_page_addr - unused_arena_first_page_addr;
   auto unused_arena_addr = unused_arena_first_page_addr;
 
-  if (OSMemory::Allocate(unused_arena_size, kNoAccess, (void *)unused_arena_addr) == nullptr) {
+  if (OSMemory::Allocate(unused_arena_size, kNoAccess, (void *)unused_arena_addr) != (void *)unused_arena_addr) {
     ERROR_LOG("[near memory allocator] allocate fixed page failed %p", unused_arena_addr);
     return nullptr;
   }
@@ -167,27 +170,37 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
     MemoryArena *arena = nullptr;
     if (executable) {
       arena = new CodeMemoryArena(arena_addr, arena_size);
-      default_allocator->code_arenas.push_back(arena);
     } else {
       arena = new DataMemoryArena(arena_addr, arena_size);
-      default_allocator->data_arenas.push_back(arena);
     }
-    OSMemory::SetPermission((void *)arena->addr, arena->size, executable ? kReadExecute : kReadWrite);
+    if (!OSMemory::SetPermission((void *)arena->addr, arena->size, executable ? kReadExecute : kReadWrite)) {
+      OSMemory::Free((void *)arena_addr, arena_size);
+      delete arena;
+      return nullptr;
+    }
+    if (executable)
+      default_allocator->code_arenas.push_back(arena);
+    else
+      default_allocator->data_arenas.push_back(arena);
     return arena;
   };
 
   auto unused_arena = register_near_arena(unused_arena_addr, unused_arena_size);
+  if (!unused_arena)
+    return nullptr;
 
   // skip placeholder block
   // FIXME: allocate the placeholder but mark it as freed
   auto placeholder_block_size = unused_mem - unused_arena->cursor_addr;
-  unused_arena->allocMemBlock(placeholder_block_size);
+  if (placeholder_block_size)
+    delete unused_arena->allocMemBlock(placeholder_block_size);
 
   auto block = unused_arena->allocMemBlock(size);
   return block;
 }
 
 MemBlock *NearMemoryAllocator::allocateNearBlock(uint32_t size, addr_t pos, size_t search_range, bool executable) {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
   if (size == 0 || search_range < size || pos < search_range || pos > UINTPTR_MAX - search_range)
     return nullptr;
   MemBlock *result = nullptr;
@@ -208,7 +221,9 @@ uint8_t *NearMemoryAllocator::allocateNearExecMemory(uint32_t size, addr_t pos, 
     return nullptr;
 
   DLOG(0, "[near memory allocator] allocate exec memory at: %p, size: %p", block->addr, block->size);
-  return (uint8_t *)block->addr;
+  auto *address = reinterpret_cast<uint8_t *>(block->addr);
+  delete block;
+  return address;
 }
 
 uint8_t *NearMemoryAllocator::allocateNearExecMemory(uint8_t *buffer, uint32_t buffer_size, addr_t pos,
@@ -228,11 +243,15 @@ uint8_t *NearMemoryAllocator::allocateNearDataMemory(uint32_t size, addr_t pos, 
     return nullptr;
 
   DLOG(0, "[near memory allocator] allocate data memory at: %p, size: %p", block->addr, block->size);
-  return (uint8_t *)block->addr;
+  auto *address = reinterpret_cast<uint8_t *>(block->addr);
+  delete block;
+  return address;
 }
 
 uint8_t *NearMemoryAllocator::allocateNearDataMemory(uint8_t *buffer, uint32_t buffer_size, addr_t pos,
                                                      size_t search_range) {
+  if (!buffer || !buffer_size)
+    return nullptr;
   auto mem = allocateNearDataMemory(buffer_size, pos, search_range);
   if (mem == nullptr)
     return nullptr;

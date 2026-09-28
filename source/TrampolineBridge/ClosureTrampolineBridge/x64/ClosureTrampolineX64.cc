@@ -17,6 +17,7 @@ ClosureTrampolineEntry *ClosureTrampoline::CreateClosureTrampoline(void *carry_d
   auto tramp_size = 32;
   auto tramp_mem = MemoryAllocator::SharedAllocator()->allocateExecMemory(tramp_size);
   if (tramp_mem == nullptr) {
+    delete tramp_entry;
     return nullptr;
   }
 #define _ turbo_assembler_.
@@ -37,7 +38,11 @@ ClosureTrampolineEntry *ClosureTrampoline::CreateClosureTrampoline(void *carry_d
   tramp_entry->carry_handler = carry_handler;
 
   auto closure_tramp_buffer = static_cast<CodeBufferBase *>(turbo_assembler_.GetCodeBuffer());
-  DobbyCodePatch(tramp_mem, (uint8_t *)closure_tramp_buffer->GetBuffer(), closure_tramp_buffer->GetBufferSize());
+  if (DobbyCodePatch(tramp_mem, (uint8_t *)closure_tramp_buffer->GetBuffer(), closure_tramp_buffer->GetBufferSize()) !=
+      kMemoryOperationSuccess) {
+    delete tramp_entry;
+    return nullptr;
+  }
 
   return tramp_entry;
 }

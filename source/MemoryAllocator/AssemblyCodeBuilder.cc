@@ -23,6 +23,7 @@ AssemblyCode *AssemblyCodeBuilder::FinalizeFromTurboAssembler(AssemblerBase *ass
       return nullptr;
 
     realized_addr = block->addr;
+    delete block;
     assembler->SetRealizedAddress((void *)realized_addr);
   }
 

@@ -83,8 +83,6 @@ private:
   std::vector<DataMemoryArena *> data_arenas;
 
 private:
-  static MemoryAllocator *shared_allocator;
-
 public:
   static MemoryAllocator *SharedAllocator();
 

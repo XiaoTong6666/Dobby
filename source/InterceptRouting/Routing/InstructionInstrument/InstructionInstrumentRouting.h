@@ -14,6 +14,11 @@ public:
     this->prologue_dispatch_bridge = nullptr;
     this->pre_handler = pre_handler;
     this->post_handler = post_handler;
+    this->closure_trampoline_ = nullptr;
+  }
+
+  ~InstructionInstrumentRouting() override {
+    delete closure_trampoline_;
   }
 
   bool DispatchRouting() override;
@@ -27,4 +32,5 @@ public:
 
 private:
   void *prologue_dispatch_bridge;
+  ClosureTrampolineEntry *closure_trampoline_;
 };

@@ -136,11 +136,26 @@ void *OSMemory::Allocate(size_t size, MemoryPermission access, void *fixed_addre
 
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
   if (fixed_address != nullptr) {
-    flags = flags | MAP_FIXED;
+#if defined(__linux__) || defined(__ANDROID__)
+    // Never replace another thread's mapping between the /proc/maps scan
+    // and mmap. Old kernels may ignore this flag and return a different
+    // address, so validate the returned address as well.
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+    flags |= MAP_FIXED_NOREPLACE;
+#else
+    // On Darwin use an address hint and reject an alternate address; MAP_FIXED
+    // would destroy a mapping another thread installed after the maps scan.
+#endif
   }
   void *result = mmap(fixed_address, size, prot, flags, kMmapFd, kMmapFdOffset);
   if (result == MAP_FAILED)
     return nullptr;
+  if (fixed_address != nullptr && result != fixed_address) {
+    munmap(result, size);
+    return nullptr;
+  }
 
   return result;
 }

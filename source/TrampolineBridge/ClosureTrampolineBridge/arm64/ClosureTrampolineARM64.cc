@@ -49,6 +49,10 @@ ClosureTrampolineEntry *ClosureTrampoline::CreateClosureTrampoline(void *carry_d
   _ EmitInt64((uint64_t)get_closure_bridge());
 
   auto closure_tramp = AssemblyCodeBuilder::FinalizeFromTurboAssembler(static_cast<AssemblerBase *>(&turbo_assembler_));
+  if (!closure_tramp) {
+    delete tramp_entry;
+    return nullptr;
+  }
 
   tramp_entry->address = (void *)closure_tramp->addr;
   tramp_entry->size = closure_tramp->size;

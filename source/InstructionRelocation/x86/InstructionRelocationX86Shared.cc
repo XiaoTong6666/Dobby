@@ -21,8 +21,14 @@ void codegen_x64_jmp_absolute_addr(CodeBufferBase *buffer, addr_t target) {
 }
 
 int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *buffer_cursor,
-                             CodeBufferBase *code_buffer, x86_insn_decode_t &insn, int8_t mode) {
+                             CodeBufferBase *code_buffer, x86_insn_decode_t &insn, int8_t mode,
+                             std::vector<X86AbsoluteBranchFixup> *fixups) {
 #define __ code_buffer->
+  auto emit_absolute_branch = [&](addr_t target) {
+    codegen_x64_jmp_absolute_addr(code_buffer, target);
+    if (fixups)
+      fixups->push_back({static_cast<uint32_t>(code_buffer->GetBufferSize() - sizeof(addr_t)), target});
+  };
 
   x86_options_t conf = {0};
   conf.mode = mode;
@@ -33,9 +39,7 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
   // x86 ip register == next instruction
   curr_orig_ip = curr_orig_ip + insn.length;
 
-#if defined(DOBBY_DEBUG)
-  int last_relo_offset = code_buffer->GetBufferSize();
-#endif
+  const int last_relo_offset = code_buffer->GetBufferSize();
   if (insn.primary_opcode >= 0x70 && insn.primary_opcode <= 0x7F) { // jc rel8
     DLOG(0, "[x86 relo] %p: jc rel8", buffer_cursor);
 
@@ -63,7 +67,7 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
     __ Emit8(6 + 8);
 
     // jmp abs addr
-    codegen_x64_jmp_absolute_addr(code_buffer, orig_insn_ref_addr);
+    emit_absolute_branch(orig_insn_ref_addr);
 #endif
 
   } else if (mode == 64 && (insn.flags & X86_INSN_DECODE_FLAG_IP_RELATIVE) &&
@@ -130,7 +134,7 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
     uint64_t orig_insn_ref_addr = curr_orig_ip + offset;
 
     // jmp *(rip)
-    codegen_x64_jmp_absolute_addr(code_buffer, orig_insn_ref_addr);
+    emit_absolute_branch(orig_insn_ref_addr);
 #endif
   } else if (insn.primary_opcode == 0xE8 || insn.primary_opcode == 0xE9) { // call or jmp rel32
     DLOG(0, "[x86 relo] %p:jmp or call rel32", buffer_cursor);
@@ -161,6 +165,8 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
       __ Emit32(0);
     }
     __ Emit64(orig_insn_ref_addr);
+    if (fixups)
+      fixups->push_back({static_cast<uint32_t>(code_buffer->GetBufferSize() - sizeof(addr_t)), orig_insn_ref_addr});
 #endif
   } else if (insn.primary_opcode >= 0xE0 && insn.primary_opcode <= 0xE2) { // LOOPNZ/LOOPZ/LOOP
     DLOG(0, "[x86 relo] %p: loop/loopcc", buffer_cursor);
@@ -168,55 +174,66 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
     int8_t offset = insn.immediate;
     addr_t orig_dst_ip = curr_orig_ip + offset;
 
-    if (insn.primary_opcode == 0xE0) { // LOOPNZ/LOOPNE
+    // LEA is a non-flag-setting decrement. PUSHF/POPF corrupt the SysV x64
+    // red-zone, and the address-size prefix selects ECX instead of RCX.
+    const bool address_override = (insn.prefix & INSN_PREFIX_ADDRESS_SIZE) != 0;
 #if defined(TARGET_ARCH_IA32)
-      // preserve flags, decrement ECX, restore flags
-      __ Emit<int8_t>(0x9C); // PUSHF
-      __ Emit<int8_t>(0xFF);
-      __ Emit<int8_t>(0xC9); // DEC ECX (FF /1, ModRM=C9)
-      __ Emit<int8_t>(0x9D); // POPF
-
-      // if ECX == 0, skip the conditional jump below
-      __ Emit<int8_t>(0xE3); // JECXZ +6
-      __ Emit<int8_t>(0x06);
-
-      // if ZF == 0, jump to original destination
-      __ Emit<int8_t>(0x0F); // JNZ rel32
-      __ Emit<int8_t>(0x85);
-      // 1-byte PUSHF + 2-byte DEC + 1-byte POPF + 2-byte JECXZ + 6-byte JNZ.
-      __ Emit32(static_cast<uint32_t>(orig_dst_ip - (curr_relo_ip + 12)));
-#else
-      // preserve flags, decrement RCX, restore flags
-      __ Emit<int8_t>(0x9C); // PUSHFQ
-      __ Emit<int8_t>(0x48);
-      __ Emit<int8_t>(0xFF);
-      __ Emit<int8_t>(0xC9); // DEC RCX (REX.W FF /1, ModRM=C9)
-      __ Emit<int8_t>(0x9D); // POPFQ
-
-      // if RCX == 0, skip the whole conditional jump sequence (2 + 2 + 14 = 18 bytes)
-      __ Emit<int8_t>(0xE3); // JRCXZ +18
-      __ Emit<int8_t>(18);
-
-      // if ZF == 0, stage-1: short JNZ to stage-2
-      const uint8_t label_jcc_cond_true_stage2 = 2;
-      __ Emit<int8_t>(0x75); // JNZ rel8
-      __ Emit<int8_t>(label_jcc_cond_true_stage2);
-
-      // else: short jump over the absolute jump
-      const uint8_t label_cond_false = 6 + 8; // size of abs jmp
-      __ Emit<int8_t>(0xEB);                  // JMP rel8
-      __ Emit<int8_t>(label_cond_false);
-
-      // stage-2: absolute jump to original destination
-      codegen_x64_jmp_absolute_addr(code_buffer, orig_dst_ip);
-#endif
+    if (address_override)
+      __ Emit8(0x66); // 16-bit CX, without touching upper ECX.
+    __ Emit8(0x8D);
+    __ Emit8(0x49);
+    __ Emit8(0xFF); // lea (e)cx, [(e)cx-1]
+    if (address_override)
+      __ Emit8(0x67); // JCXZ instead of JECXZ.
+    __ Emit8(0xE3);
+    __ Emit8(insn.primary_opcode == 0xE2 ? 5 : 6);
+    if (insn.primary_opcode != 0xE2) {
+      __ Emit8(0x0F);
+      __ Emit8(insn.primary_opcode == 0xE0 ? 0x85 : 0x84);
     } else {
-      // LOOPZ/LOOP
-      UNIMPLEMENTED();
+      __ Emit8(0xE9);
     }
+    const addr_t next_ip = curr_relo_ip + code_buffer->GetBufferSize() - last_relo_offset + 4;
+    __ Emit32(static_cast<uint32_t>(orig_dst_ip - next_ip));
+#else
+    if (!address_override)
+      __ Emit8(0x48); // 64-bit RCX; 0x67 selects ECX.
+    __ Emit8(0x8D);
+    __ Emit8(0x49);
+    __ Emit8(0xFF); // lea rcx/ecx,[rcx-1] (flags unchanged)
+    if (address_override)
+      __ Emit8(0x67); // JECXZ in long mode.
+    __ Emit8(0xE3);
+    __ Emit8(insn.primary_opcode == 0xE2 ? 14 : 18);
+    if (insn.primary_opcode != 0xE2) {
+      __ Emit8(insn.primary_opcode == 0xE0 ? 0x75 : 0x74); // JNZ / JZ
+      __ Emit8(2);
+      __ Emit8(0xEB);
+      __ Emit8(14);
+    }
+    emit_absolute_branch(orig_dst_ip);
+#endif
   } else if (insn.primary_opcode == 0xE3) {
-    // JCXZ JCEXZ JCRXZ
-    UNIMPLEMENTED();
+    // JCXZ/JECXZ/JRCXZ: preserve the original address-size prefix and avoid
+    // changing FLAGS or touching the stack. The taken path enters the
+    // out-of-line absolute branch; the other path skips it.
+#if defined(TARGET_ARCH_IA32)
+    if (insn.prefix & INSN_PREFIX_ADDRESS_SIZE)
+      __ Emit8(0x67);
+    __ Emit8(0xE3);
+    __ Emit8(5);
+    __ Emit8(0xE9);
+    const addr_t next_ip = curr_relo_ip + code_buffer->GetBufferSize() - last_relo_offset + 4;
+    __ Emit32(static_cast<uint32_t>((curr_orig_ip + static_cast<int8_t>(insn.immediate)) - next_ip));
+#else
+    if (insn.prefix & INSN_PREFIX_ADDRESS_SIZE)
+      __ Emit8(0x67);
+    __ Emit8(0xE3);
+    __ Emit8(2);
+    __ Emit8(0xEB);
+    __ Emit8(14);
+    emit_absolute_branch(curr_orig_ip + static_cast<int8_t>(insn.immediate));
+#endif
   } else {
     __ EmitBuffer(buffer_cursor, insn.length);
   }

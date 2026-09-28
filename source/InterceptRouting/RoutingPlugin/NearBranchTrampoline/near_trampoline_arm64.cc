@@ -72,6 +72,7 @@ CodeBufferBase *GenerateNearTrampolineBuffer(InterceptRouting *routing, addr_t s
     if (!fast_forward_trampoline)
       return nullptr;
     _ b(fast_forward_trampoline->addr - src);
+    delete fast_forward_trampoline;
   }
 
   // free the original trampoline

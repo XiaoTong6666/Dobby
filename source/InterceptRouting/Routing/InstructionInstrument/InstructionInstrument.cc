@@ -3,9 +3,12 @@
 #include "Interceptor.h"
 #include "InterceptRouting/InterceptRouting.h"
 #include "InterceptRouting/Routing/InstructionInstrument/InstructionInstrumentRouting.h"
+#include "InterceptRouting/HookFailure.h"
+#include <memory>
 
 PUBLIC int DobbyInstrument(void *address, dobby_instrument_callback_t pre_handler) {
-  if (!address) {
+  std::lock_guard<std::recursive_mutex> mutation(Interceptor::MutationMutex());
+  if (!address || !pre_handler) {
     ERROR_LOG("address is 0x0.\n");
     return RS_FAILED;
   }
@@ -16,13 +19,6 @@ PUBLIC int DobbyInstrument(void *address, dobby_instrument_callback_t pre_handle
 #endif
 #endif
 
-#if defined(ANDROID)
-  void *page_align_address = (void *)ALIGN_FLOOR(address, OSMemory::PageSize());
-  if (!OSMemory::SetPermission(page_align_address, OSMemory::PageSize(), kReadExecute)) {
-    return RS_FAILED;
-  }
-#endif
-
   DLOG(0, "\n\n----- [DobbyInstrument:%p] -----", address);
 
   auto entry = Interceptor::SharedInstance()->find((addr_t)address);
@@ -31,18 +27,28 @@ PUBLIC int DobbyInstrument(void *address, dobby_instrument_callback_t pre_handle
     return RS_FAILED;
   }
 
-  entry = new InterceptEntry(kInstructionInstrument, (addr_t)address);
+  std::unique_ptr<InterceptEntry> pending(new InterceptEntry(kInstructionInstrument, (addr_t)address));
+  entry = pending.get();
 
   auto routing = new InstructionInstrumentRouting(entry, pre_handler, nullptr);
+  Interceptor::SharedInstance()->add(entry);
   routing->Prepare();
   if (!routing->DispatchRouting()) {
+    Interceptor::SharedInstance()->remove(entry->patched_addr);
     return RS_FAILED;
   }
   if (!routing->Commit()) {
+    if (DobbyOriginalBytesRestored(entry)) {
+      Interceptor::SharedInstance()->remove(entry->patched_addr);
+    } else {
+      entry->state = InterceptEntryState::Removing;
+      pending.release();
+    }
     return RS_FAILED;
   }
 
-  Interceptor::SharedInstance()->add(entry);
+  entry->state = InterceptEntryState::Active;
+  pending.release();
 
   return RS_SUCCESS;
 }

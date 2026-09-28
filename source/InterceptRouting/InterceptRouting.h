@@ -18,6 +18,15 @@ public:
     trampoline_target_ = 0;
   }
 
+  virtual ~InterceptRouting() {
+    // These are metadata objects; executable arena pages are intentionally
+    // retained because the caller may still hold an original-function pointer.
+    delete origin_;
+    delete relocated_;
+    delete trampoline_;
+    delete trampoline_buffer_;
+  }
+
   virtual bool DispatchRouting() = 0;
 
   virtual void Prepare();

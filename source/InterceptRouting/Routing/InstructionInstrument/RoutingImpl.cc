@@ -15,6 +15,9 @@ bool InstructionInstrumentRouting::BuildRouting() {
 #endif
 #endif
   auto closure_trampoline = ClosureTrampoline::CreateClosureTrampoline(entry_, handler);
+  if (!closure_trampoline)
+    return false;
+  closure_trampoline_ = closure_trampoline;
   this->SetTrampolineTarget((addr_t)closure_trampoline->address);
   DLOG(0, "[closure trampoline] closure trampoline: %p, data: %p", closure_trampoline->address, entry_);
 

@@ -1,10 +1,12 @@
 #include "InterceptEntry.h"
 #include "Interceptor.h"
+#include "InterceptRouting/InterceptRouting.h"
 
 InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   this->id = 0;
   this->type = type;
   this->routing = nullptr;
+  this->state = InterceptEntryState::Installing;
   this->patched_size = 0;
   this->relocated_addr = 0;
   this->relocated_size = 0;
@@ -23,4 +25,8 @@ InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
 
   this->patched_addr = address;
   this->id = Interceptor::SharedInstance()->count();
+}
+
+InterceptEntry::~InterceptEntry() {
+  delete routing;
 }

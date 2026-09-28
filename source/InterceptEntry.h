@@ -6,11 +6,13 @@
 typedef enum { kFunctionInlineHook, kInstructionInstrument } InterceptEntryType;
 
 class InterceptRouting;
+enum class InterceptEntryState { Installing, Active, Removing };
 
 typedef struct InterceptEntry {
   uint32_t id;
   InterceptEntryType type;
   InterceptRouting *routing;
+  InterceptEntryState state;
 
   union {
     addr_t addr;
@@ -27,4 +29,5 @@ typedef struct InterceptEntry {
   bool thumb_mode;
 
   InterceptEntry(InterceptEntryType type, addr_t address);
+  ~InterceptEntry();
 } InterceptEntry;

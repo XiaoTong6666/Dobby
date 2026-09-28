@@ -12,8 +12,6 @@ public:
   }
 
 private:
-  static NearMemoryAllocator *shared_allocator;
-
 public:
   static NearMemoryAllocator *SharedAllocator();
 

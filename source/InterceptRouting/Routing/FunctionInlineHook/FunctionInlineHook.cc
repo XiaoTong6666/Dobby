@@ -2,12 +2,15 @@
 
 #include "Interceptor.h"
 #include "InterceptRouting/Routing/FunctionInlineHook/FunctionInlineHookRouting.h"
+#include "InterceptRouting/HookFailure.h"
+#include <memory>
 
 PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func) {
+  std::lock_guard<std::recursive_mutex> mutation(Interceptor::MutationMutex());
   if (origin_func) {
     *origin_func = nullptr;
   }
-  if (!address) {
+  if (!address || !replace_func) {
     ERROR_LOG("function address is 0x0");
     return RS_FAILED;
   }
@@ -19,13 +22,6 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
 #endif
 #endif
 
-#if defined(ANDROID)
-  void *page_align_address = (void *)ALIGN_FLOOR(address, OSMemory::PageSize());
-  if (!OSMemory::SetPermission(page_align_address, OSMemory::PageSize(), kReadExecute)) {
-    return RS_FAILED;
-  }
-#endif
-
   DLOG(0, "----- [DobbyHook:%p] -----", address);
 
   // check if already register
@@ -35,24 +31,36 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
     return RS_FAILED;
   }
 
-  entry = new InterceptEntry(kFunctionInlineHook, (addr_t)address);
+  std::unique_ptr<InterceptEntry> pending(new InterceptEntry(kFunctionInlineHook, (addr_t)address));
+  entry = pending.get();
 
   auto *routing = new FunctionInlineHookRouting(entry, replace_func);
+  // Reserve this address while routing is being built; also prevents a
+  // callback re-entering DobbyHook for the same address on this thread.
+  Interceptor::SharedInstance()->add(entry);
   routing->Prepare();
   if (!routing->DispatchRouting()) {
+    Interceptor::SharedInstance()->remove(entry->patched_addr);
     return RS_FAILED;
   }
 
   if (!routing->Commit()) {
+    if (DobbyOriginalBytesRestored(entry)) {
+      Interceptor::SharedInstance()->remove(entry->patched_addr);
+    } else {
+      entry->state = InterceptEntryState::Removing;
+      pending.release(); // retain metadata until DobbyDestroy retries restoration
+    }
     return RS_FAILED;
   }
 
-  Interceptor::SharedInstance()->add(entry);
+  entry->state = InterceptEntryState::Active;
 
   // Do not publish a trampoline for a hook that did not install successfully.
   if (origin_func) {
     *origin_func = (dobby_dummy_func_t)entry->relocated_addr;
   }
+  pending.release();
 
   return RS_SUCCESS;
 }

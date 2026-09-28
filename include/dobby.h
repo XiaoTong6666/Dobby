@@ -170,9 +170,14 @@ int DobbyImportTableReplace(char *image_name, char *symbol_name, dobby_dummy_fun
 // [!!! READ ME !!!]
 // for arm, Arm64, dobby will try use b xxx instead of ldr absolute indirect branch
 // for x64, dobby always use absolute indirect jump
-#if defined(__arm__) || defined(__arm64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__)
+#if defined(__arm__) || defined(__arm64__) || defined(__aarch64__) || defined(_M_IX86) || defined(__i386__) ||         \
+    defined(_M_X64) || defined(__x86_64__)
 void dobby_enable_near_branch_trampoline();
 void dobby_disable_near_branch_trampoline();
+// Require a four-byte near branch instead of falling back to a long inline
+// patch. Use this when the target entry is too short for a normal trampoline.
+// This is a process-wide setting; configure it before installing hooks.
+void dobby_require_near_branch_trampoline(bool required);
 #endif
 
 #ifdef __cplusplus
