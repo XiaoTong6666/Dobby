@@ -13,6 +13,7 @@
 
 #include "inst_constants.h"
 #include "inst_decode_encode_kit.h"
+#include <vector>
 
 using namespace zz::arm64;
 
@@ -49,6 +50,18 @@ typedef struct {
   tinystl::unordered_map<vmaddr_t, AssemblerPseudoLabel *> label_map;
 
 } relo_ctx_t;
+
+struct DirectBranchFixup {
+  uint32_t offset;
+  addr_t target;
+  bool link;
+};
+
+struct LiteralLoadFixup {
+  uint32_t offset;
+  addr_t target;
+  arm64_inst_t instruction;
+};
 
 // ---
 
@@ -164,6 +177,8 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 #define _ turbo_assembler_.
 
   auto relocated_buffer = turbo_assembler_.GetCodeBuffer();
+  std::vector<DirectBranchFixup> direct_branches;
+  std::vector<LiteralLoadFixup> literal_loads;
 
   while (ctx->buffer_cursor < ctx->buffer + ctx->buffer_size) {
     uint32_t orig_off = ctx->buffer_cursor - ctx->buffer;
@@ -186,17 +201,13 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
       int64_t offset = decode_imm26_offset(inst);
       addr_t dst_vmaddr = relo_cur_src_vmaddr(ctx) + offset;
 
-      RelocLabel *dst_label = new RelocLabel(dst_vmaddr);
-      _ AppendRelocLabel(dst_label);
-
-      {
-        _ Ldr(TMP_REG_0, dst_label);
-        if ((inst & UnconditionalBranchMask) == BL) {
-          _ blr(TMP_REG_0);
-        } else {
-          _ br(TMP_REG_0);
-        }
-      }
+      // A literal load followed by BR/BLR destroys x17, which can still
+      // contain a live value at this relocated instruction. A direct branch
+      // does not change any general-purpose register. If it cannot reach its
+      // target after placement, reject this relocation rather than clobber.
+      const bool link = (inst & UnconditionalBranchMask) == BL;
+      direct_branches.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, link});
+      _ Emit(static_cast<arm64_inst_t>(link ? BL : B));
 
     } else if (inst_is_ldr_literal(inst)) {
       DLOG(0, "%d:relo <ldr_literal> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
@@ -204,19 +215,12 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
       int64_t offset = decode_imm19_offset(inst);
       addr_t dst_vmaddr = relo_cur_src_vmaddr(ctx) + offset;
 
-      int rt = decode_rt(inst);
-      char opc = bits(inst, 30, 31);
-
-      {
-        _ Mov(TMP_REG_0, dst_vmaddr);
-        if (opc == 0b00)
-          _ ldr(W(rt), MemOperand(TMP_REG_0, 0));
-        else if (opc == 0b01)
-          _ ldr(X(rt), MemOperand(TMP_REG_0, 0));
-        else {
-          UNIMPLEMENTED();
-        }
-      }
+      // Preserve the original literal-load instruction, including its target
+      // register and SIMD/PRFM variant. Rebase its PC-relative immediate after
+      // locating the executable buffer. Replacing it with MOV+LDR would change
+      // a destination register *before* a possible memory fault.
+      literal_loads.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, inst});
+      _ Emit(inst);
     } else if (inst_is_adr(inst)) {
       DLOG(0, "%d:relo <adr> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
 
@@ -254,20 +258,15 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
         cond = cond ^ 1;
         set_bits(branch_instr, 0, 3, cond);
 
-        int64_t offset = 4 * 3;
+        int64_t offset = 4 * 2;
         uint32_t imm19 = offset >> 2;
         set_bits(branch_instr, 5, 23, imm19);
       }
 
-      RelocLabel *dst_label = new RelocLabel(dst_vmaddr);
-      _ AppendRelocLabel(dst_label);
-
       {
         _ Emit(branch_instr);
-        {
-          _ Ldr(TMP_REG_0, dst_label);
-          _ br(TMP_REG_0);
-        }
+        direct_branches.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, false});
+        _ Emit(static_cast<arm64_inst_t>(B));
       }
     } else if (inst_is_compare_b(inst)) {
       DLOG(0, "%d:relo <compare_b> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
@@ -281,20 +280,15 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
         op = op ^ 1;
         set_bit(branch_instr, 24, op);
 
-        int64_t offset = 4 * 3;
+        int64_t offset = 4 * 2;
         uint32_t imm19 = offset >> 2;
         set_bits(branch_instr, 5, 23, imm19);
       }
 
-      RelocLabel *dst_label = new RelocLabel(dst_vmaddr);
-      _ AppendRelocLabel(dst_label);
-
       {
         _ Emit(branch_instr);
-        {
-          _ Ldr(TMP_REG_0, dst_label);
-          _ br(TMP_REG_0);
-        }
+        direct_branches.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, false});
+        _ Emit(static_cast<arm64_inst_t>(B));
       }
     } else if (inst_is_test_b(inst)) {
       DLOG(0, "%d:relo <test_b> at %p", relocated_insn_count++, relo_cur_src_vmaddr(ctx));
@@ -308,20 +302,15 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
         op = op ^ 1;
         set_bit(branch_instr, 24, op);
 
-        int64_t offset = 4 * 3;
+        int64_t offset = 4 * 2;
         uint32_t imm14 = offset >> 2;
         set_bits(branch_instr, 5, 18, imm14);
       }
 
-      RelocLabel *dst_label = new RelocLabel(dst_vmaddr);
-      _ AppendRelocLabel(dst_label);
-
       {
         _ Emit(branch_instr);
-        {
-          _ Ldr(TMP_REG_0, dst_label);
-          _ br(TMP_REG_0);
-        }
+        direct_branches.push_back({static_cast<uint32_t>(relocated_buffer->GetBufferSize()), dst_vmaddr, false});
+        _ Emit(static_cast<arm64_inst_t>(B));
       }
     } else {
       _ Emit(inst);
@@ -355,20 +344,42 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
   // Bind all labels
   turbo_assembler_.RelocBind();
 
-  if (branch) {
-    const uint32_t relocated_size = relocated_buffer->GetBufferSize();
-    const addr_t resume = ctx->origin->addr + ctx->origin->size;
-    const addr_t preferred_start = resume - tail_branch_offset;
-    auto *near_code = NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(
-        relocated_size, preferred_start, kArm64DirectBranchRange - sizeof(arm64_inst_t));
-    if (near_code == nullptr) {
-      ERROR_LOG("[insn relocate] failed to allocate ARM64 original trampoline near %p",
-                ctx->origin->addr);
-      return -1;
+  // Branch and literal targets must be reachable from the actual relocated
+  // buffer. Never fall back to a register-clobbering absolute jump/load.
+  if (branch || !direct_branches.empty() || !literal_loads.empty()) {
+    bool use_simulated_address = false;
+#if defined(TEST_WITH_UNICORN)
+    // Unicorn executes a synthetic VM address; emitted bytes live in a
+    // separate host allocation created by AssemblyCodeBuilder.
+    use_simulated_address = !branch && ctx->dst_vmaddr != 0;
+#endif
+    if (!use_simulated_address) {
+      const uint32_t relocated_size = relocated_buffer->GetBufferSize();
+      const addr_t resume = ctx->origin->addr + ctx->origin->size;
+      addr_t preferred_start = branch ? resume - tail_branch_offset : ctx->origin->addr;
+      size_t search_range = kArm64DirectBranchRange - sizeof(arm64_inst_t);
+      if (!literal_loads.empty()) {
+        // Literal loads have a much smaller (+/-1 MiB) reach than B/BL.
+        // Centre near the first literal rather than accepting a distant
+        // trampoline which can never preserve its original instruction.
+        constexpr size_t kLiteralRange = size_t{1} << 20;
+        if (relocated_size + sizeof(arm64_inst_t) >= kLiteralRange)
+          return -1;
+        preferred_start = literal_loads.front().target - literal_loads.front().offset;
+        search_range = kLiteralRange - relocated_size - sizeof(arm64_inst_t);
+      }
+      auto *near_code =
+          NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(relocated_size, preferred_start, search_range);
+      if (near_code == nullptr) {
+        ERROR_LOG("[insn relocate] failed to allocate ARM64 relocation near %p", preferred_start);
+        return -1;
+      }
+      ctx->dst_vmaddr = reinterpret_cast<addr_t>(near_code);
+      turbo_assembler_.SetRealizedAddress(near_code);
     }
-    ctx->dst_vmaddr = reinterpret_cast<addr_t>(near_code);
-    turbo_assembler_.SetRealizedAddress(near_code);
-
+  }
+  if (branch) {
+    const addr_t resume = ctx->origin->addr + ctx->origin->size;
     const addr_t branch_pc = ctx->dst_vmaddr + tail_branch_offset;
     const int64_t delta = static_cast<int64_t>(resume) - static_cast<int64_t>(branch_pc);
     if ((delta & 3) != 0 || delta < -kArm64DirectBranchRange ||
@@ -379,6 +390,37 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 
     const arm64_inst_t tail_branch = B | bits(delta >> 2, 0, 25);
     relocated_buffer->RewriteInst(tail_branch_offset, tail_branch);
+  }
+
+  for (const auto &fixup : direct_branches) {
+    addr_t target = fixup.target;
+    const addr_t source_begin = ctx->origin->addr;
+    if (target >= source_begin && target < source_begin + ctx->origin->size) {
+      const off_t source_off = static_cast<off_t>(target - source_begin);
+      const auto it = ctx->relocated_offset_map.find(source_off);
+      if (it == ctx->relocated_offset_map.end())
+        return -1;
+      target = ctx->dst_vmaddr + it->second;
+    }
+    const addr_t branch_pc = ctx->dst_vmaddr + fixup.offset;
+    const int64_t delta = static_cast<int64_t>(target) - static_cast<int64_t>(branch_pc);
+    if ((delta & 3) != 0 || delta < -kArm64DirectBranchRange || delta >= kArm64DirectBranchRange) {
+      ERROR_LOG("[insn relocate] ARM64 direct branch outside reach: %p -> %p", branch_pc, target);
+      return -1;
+    }
+    relocated_buffer->RewriteInst(fixup.offset, (fixup.link ? BL : B) | bits(delta >> 2, 0, 25));
+  }
+
+  for (const auto &fixup : literal_loads) {
+    const addr_t load_pc = ctx->dst_vmaddr + fixup.offset;
+    const int64_t delta = static_cast<int64_t>(fixup.target) - static_cast<int64_t>(load_pc);
+    if ((delta & 3) != 0 || delta < -(INT64_C(1) << 20) || delta >= (INT64_C(1) << 20)) {
+      ERROR_LOG("[insn relocate] ARM64 literal load outside reach: %p -> %p", load_pc, fixup.target);
+      return -1;
+    }
+    arm64_inst_t relocated_load = fixup.instruction;
+    set_bits(relocated_load, 5, 23, bits(delta >> 2, 0, 18));
+    relocated_buffer->RewriteInst(fixup.offset, relocated_load);
   }
 
   // Generate executable code
