@@ -4,22 +4,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <sys/mman.h>
 #include <unistd.h>
 
 struct TrackedAllocator {
-  static size_t allocated;
+  static std::unordered_map<void *, size_t> allocations;
   static bool invalid_free;
   static void *static_allocate(size_t n) {
-    allocated = n;
-    return malloc(n);
+    void *p = malloc(n);
+    allocations[p] = n;
+    return p;
   }
   static void static_deallocate(void *p, size_t n) {
-    if (p == nullptr || allocated != n) invalid_free = true;
+    if (p == nullptr || allocations.count(p) == 0 || allocations[p] != n) invalid_free = true;
+    allocations.erase(p);
     free(p);
   }
 };
-size_t TrackedAllocator::allocated = 0;
+std::unordered_map<void *, size_t> TrackedAllocator::allocations;
 bool TrackedAllocator::invalid_free = false;
 
 int main(int argc, char **argv) {
