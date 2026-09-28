@@ -54,6 +54,15 @@ int main(int argc, char **argv) {
     }
     return 0;
   }
+  if (strcmp(argv[1], "exec-align") == 0) {
+    auto *first = MemoryAllocator::SharedAllocator()->allocateExecBlock(10);
+    auto *second = MemoryAllocator::SharedAllocator()->allocateExecBlock(14);
+    if (first == nullptr || second == nullptr || (second->addr & 3) != 0) {
+      fprintf(stderr, "sequential executable allocations are not 4-byte aligned\n");
+      return 1;
+    }
+    return 0;
+  }
   if (strcmp(argv[1], "data") != 0) return 2;
   // A data block must not be provisioned through the executable arena path.
   auto *data = MemoryAllocator::SharedAllocator()->allocateDataBlock(8);

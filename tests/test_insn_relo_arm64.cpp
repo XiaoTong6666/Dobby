@@ -40,8 +40,19 @@ tbz x0, #0, #0x4000
 
 #include "UniconEmulator.h"
 
-int main() {
+int main(int argc, char **argv) {
   set_global_arch("arm64");
+
+  if (argc == 2 && strcmp(argv[1], "--x17-branch") == 0) {
+    // A taken conditional branch must not clobber an otherwise-live x17.
+    // Both paths fault at the same unmapped target; compare the saved register.
+    check_insn_relo("\x00\x00\x80\xd2\x1f\x00\x00\xf1\x00\x00\x02\x54", 12,
+                    false, -1, ^(UniconEmulator *orig, UniconEmulator *relo) {
+                      assert(orig->readRegister(UC_ARM64_REG_X17) ==
+                             relo->readRegister(UC_ARM64_REG_X17));
+                    });
+    return 0;
+  }
 
   // b #-0x4000
   check_insn_relo("\x00\xf0\xff\x17", 4, true, -1, nullptr);

@@ -188,7 +188,16 @@ void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, in
     origin->reset(origin->addr + 1, origin->size);
   }
 
-  GenRelocateCode(buffer, origin, relocated, false);
+  // The relocation API encodes Thumb mode in bit 0 of the input pointer.
+  // String literal addresses have arbitrary parity: using one directly can
+  // accidentally interpret ARM instructions as Thumb (and vice versa).
+  alignas(4) uint8_t aligned_code[128] = {};
+  assert(buffer_size <= sizeof(aligned_code));
+  memcpy(aligned_code, buffer, buffer_size);
+  void *relocation_input = aligned_code;
+  if (g_arch == "thumb")
+    relocation_input = aligned_code + 1;
+  GenRelocateCode(relocation_input, origin, relocated, false);
 
   if (g_arch == "thumb") {
     orig_ue->writeRegister(UC_ARM_REG_CPSR, (void *)0x20);
