@@ -385,8 +385,14 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
   if (source_end < source_begin)
     return -1;
   for (addr_t target : address_targets) {
-    if (target >= source_begin && target < source_end) {
-      ERROR_LOG("[insn relocate] ADR target overlaps overwritten entry: %p in [%p,%p)", target, source_begin,
+    // ADR materializes an address, not a sized load. A consumer can dereference
+    // a range starting BEFORE the patched entry and extending into it. Since
+    // the instruction does not tell us the eventual access width, only a
+    // forward address outside the stolen interval is demonstrably safe from
+    // this kind of overlap. Reject backward ADR targets rather than guessing
+    // that a 4/8/16-byte read is the only possible consumer.
+    if (target < source_end) {
+      ERROR_LOG("[insn relocate] ADR target may overlap overwritten entry: %p in/before [%p,%p)", target, source_begin,
                 source_end);
       return -1;
     }
