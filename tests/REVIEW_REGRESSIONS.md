@@ -14,9 +14,10 @@ existing instruction emulator tests:
     cmake --build build-review
     ctest --test-dir build-review --output-on-failure
 
-The review_self_hook_free test installs a Hook on libc free() itself. It
-asserts that no invocation reaches the replacement before the original
-pointer is published. The regression_patch_large_scratch test exercises
+The review_self_hook_free and review_self_hook_mprotect tests install Hooks
+on libc memory functions themselves. They assert that no invocation reaches
+the replacement before the original pointer is published.
+The regression_patch_large_scratch test exercises
 patch metadata spanning more than 64 memory pages.
 
 The command below is an intentional *unsafe reproducer*, not part of the
@@ -35,7 +36,8 @@ Build the opt-in fixture and run each mode in a fresh process:
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
       -DDOBBY_GENERATE_SHARED=OFF -DDOBBY_ANDROID_ARM64_REVIEW_TEST=ON
-    cmake --build build-android-review --target dobby_android_arm64_review
+    cmake --build build-android-review --target \
+      dobby_android_arm64_review dobby_android_sync_failure_review
     tests/run_android_arm64_review.sh \
       build-android-review/dobby_android_arm64_review SERIAL
 
@@ -46,6 +48,9 @@ adr-data must reject a default long Hook when preserving the returned
 address would expose overwritten literal data. Both near modes must preserve
 address identity and contents. literal-left-overlap checks an eight-byte
 load beginning before the overwritten entry but intersecting it.
+adr-left-overlap rejects a backward ADR even with a four-byte patch: ADR
+has no consumer access-width metadata and the returned pointer can expose
+bytes written by the Hook.
 
 rollback-* injects failure of the original page's mprotect restore, then
 checks unchanged bytes, unpublished original, successful retry and Destroy.
@@ -54,6 +59,15 @@ old/new results after 160 install/remove API returns. It requires Linux
 MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE; a successful local cache clear
 alone is not sufficient. execute-race is separate: it only accepts old or
 new values while the four-byte entry update is in flight.
+sync-failure intentionally fails the cross-core barrier twice. It requires
+the failed install to retain metadata even if local bytes match the original,
+reject duplicate installs, and release that metadata only after explicit
+Destroy successfully re-synchronizes the original instruction stream.
+
+On AArch64 Linux/Android, this fork requires kernel sync-core membarrier
+support (Linux 4.16 or a suitable vendor backport). On older kernels lacking
+that capability, CodePatch intentionally fails closed rather than treating
+a local cache flush as cross-core synchronization.
 
 This establishes the synchronized single-instruction path on tested
 systems, not the safety of long patches under concurrent execution or

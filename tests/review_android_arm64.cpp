@@ -5,6 +5,7 @@
 #include <cstring>
 #include <atomic>
 #include <cerrno>
+#include <cstdarg>
 #include <chrono>
 #include <linux/membarrier.h>
 #include <sched.h>
@@ -36,16 +37,23 @@ static bool is_rw_without_exec(void *address) {
 
 static std::atomic<uintptr_t> fail_restore_page{0};
 static std::atomic<unsigned> restore_injections{0};
-extern "C" int __real_mprotect(void *, size_t, int);
-extern "C" int __wrap_mprotect(void *address, size_t size, int prot) {
+extern "C" long __real_syscall(long, ...);
+extern "C" long __wrap_syscall(long number, ...) {
+  va_list args;
+  va_start(args, number);
+  const long a = va_arg(args, long);
+  const long b = va_arg(args, long);
+  const long c = va_arg(args, long);
+  const long d = va_arg(args, long);
+  va_end(args);
   uintptr_t watched = fail_restore_page.load(std::memory_order_relaxed);
-  if (watched != 0 && reinterpret_cast<uintptr_t>(address) == watched && prot == (PROT_READ | PROT_EXEC) &&
-      fail_restore_page.compare_exchange_strong(watched, 0)) {
+  if (number == SYS_mprotect && watched != 0 && static_cast<uintptr_t>(a) == watched &&
+      static_cast<int>(c) == (PROT_READ | PROT_EXEC) && fail_restore_page.compare_exchange_strong(watched, 0)) {
     restore_injections.fetch_add(1, std::memory_order_relaxed);
     errno = EACCES;
     return -1;
   }
-  return __real_mprotect(address, size, prot);
+  return __real_syscall(number, a, b, c, d);
 }
 
 static bool verify_rw_mapping_remains_rw() {
@@ -82,6 +90,7 @@ extern "C" long review_literal(long);
 extern "C" long review_short(long);
 extern "C" long review_short_neighbor(long);
 extern "C" const uint64_t *review_adr();
+extern "C" const uint64_t *review_adr_left();
 extern "C" long review_overlap(long);
 
 asm(R"(
@@ -115,6 +124,18 @@ review_adr:
 1:
   .quad 0x1020304050607080
 .size review_adr, .-review_adr
+
+.p2align 4
+1:
+  .word 0x11223344
+.global review_adr_left
+.type review_adr_left,%function
+review_adr_left:
+  adr x0, 1b
+  ret
+  nop
+  nop
+.size review_adr_left, .-review_adr_left
 
 .p2align 4
 1:
@@ -193,6 +214,32 @@ static int test_restore_failure(bool near, bool required) {
 static const uint64_t *replacement_adr() {
   static uint64_t replacement = 0x123456789;
   return &replacement;
+}
+
+static int test_adr_left_overlap(bool near) {
+  const auto *pointer = reinterpret_cast<const uint8_t *>(review_adr_left());
+  uint64_t before = 0;
+  memcpy(&before, pointer, sizeof(before));
+  uint8_t entry[16] = {};
+  memcpy(entry, reinterpret_cast<const void *>(review_adr_left), sizeof(entry));
+  if (near)
+    dobby_enable_near_branch_trampoline();
+  dobby_dummy_func_t original = nullptr;
+  const int installed = DobbyHook(reinterpret_cast<void *>(review_adr_left),
+                                  reinterpret_cast<dobby_dummy_func_t>(replacement_adr), &original);
+  uint64_t after = 0;
+  memcpy(&after, pointer, sizeof(after));
+  int destroyed = installed == RT_SUCCESS ? DobbyDestroy(reinterpret_cast<void *>(review_adr_left)) : RT_FAILED;
+  if (near)
+    dobby_disable_near_branch_trampoline();
+  const bool restored = memcmp(entry, reinterpret_cast<const void *>(review_adr_left), sizeof(entry)) == 0;
+  // ADR's address is before the entry, but an eight-byte access overlaps it.
+  // No patch should silently mutate the data visible through this pointer.
+  const bool ok = installed != RT_SUCCESS && original == nullptr && before == after && restored;
+  printf("adr-left-overlap mode=%s status=%d before=0x%llx after=0x%llx destroy=%d restored=%d result=%s\n",
+         near ? "near" : "default", installed, static_cast<unsigned long long>(before),
+         static_cast<unsigned long long>(after), destroyed, restored, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
 }
 
 static int test_adr_inline_data(bool near, bool required) {
@@ -524,6 +571,10 @@ template <typename T> static bool roundtrip(const char *name, T target, T replac
 
 int main(int argc, char **argv) {
   setbuf(stdout, nullptr);
+  if (argc > 1 && strcmp(argv[1], "adr-left-overlap") == 0)
+    return test_adr_left_overlap(false);
+  if (argc > 1 && strcmp(argv[1], "adr-left-overlap-near") == 0)
+    return test_adr_left_overlap(true);
   if (argc > 1 && strcmp(argv[1], "adr-data") == 0)
     return test_adr_inline_data(false, false);
   if (argc > 1 && strcmp(argv[1], "adr-data-near") == 0)

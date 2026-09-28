@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <vector>
 #include <cinttypes>
+#include <cstdarg>
+#include <sys/syscall.h>
 
 static int PagePermissions(void *address) {
   FILE *maps = fopen("/proc/self/maps", "r");
@@ -32,8 +34,19 @@ static int PagePermissions(void *address) {
 static bool fail_rx_restore = false;
 static int fail_rx_count = 0;
 static void *fail_writable_page = nullptr;
-extern "C" int __real_mprotect(void *, size_t, int);
-extern "C" int __wrap_mprotect(void *addr, size_t length, int prot) {
+extern "C" long __real_syscall(long, ...);
+extern "C" long __wrap_syscall(long number, ...) {
+  va_list args;
+  va_start(args, number);
+  const long raw_address = va_arg(args, long);
+  const long raw_length = va_arg(args, long);
+  const long raw_prot = va_arg(args, long);
+  const long raw_extra = va_arg(args, long);
+  va_end(args);
+  if (number != SYS_mprotect)
+    return __real_syscall(number, raw_address, raw_length, raw_prot, raw_extra);
+  void *addr = reinterpret_cast<void *>(raw_address);
+  const int prot = static_cast<int>(raw_prot);
   if (addr == fail_writable_page && prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
     fail_writable_page = nullptr;
     errno = EACCES;
@@ -49,7 +62,7 @@ extern "C" int __wrap_mprotect(void *addr, size_t length, int prot) {
     errno = EACCES;
     return -1;
   }
-  return __real_mprotect(addr, length, prot);
+  return __real_syscall(number, raw_address, raw_length, raw_prot, raw_extra);
 }
 
 int main(int argc, char **argv) {

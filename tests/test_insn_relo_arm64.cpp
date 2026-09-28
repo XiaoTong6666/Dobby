@@ -90,6 +90,14 @@ int main(int argc, char **argv) {
     }
     return 0;
   }
+  if (argc == 2 && strcmp(argv[1], "--adr-backward-rejected") == 0) {
+    alignas(4) const uint8_t backward_adr[] = {0x00, 0x00, 0xfe, 0x10};
+    CodeMemBlock original(0x100014000, 4);
+    CodeMemBlock relocated(0x100024000, 0x1000);
+    GenRelocateCode(const_cast<uint8_t *>(backward_adr), &original, &relocated, false);
+    assert(relocated.addr == 0 && relocated.size == 0);
+    return 0;
+  }
   if (argc == 2 && strcmp(argv[1], "--inline-literal") == 0) {
     const char code[] = "\x40\x00\x00\x58\xc0\x03\x5f\xd6"
                         "\x88\x77\x66\x55\x44\x33\x22\x11";
@@ -124,8 +132,8 @@ int main(int argc, char **argv) {
   // ldr x0, #0x4000
   check_insn_relo("\x00\x00\x02\x58", 4, true, -1, nullptr);
 
-  // adr x0, #-0x4000
-  check_insn_relo("\x00\x00\xfe\x10", 4, false, UC_ARM64_REG_X0, nullptr);
+  // Backward ADR is deliberately rejected: its returned address can be
+  // dereferenced across the stolen entry with an unknown access width.
   // adr x0, #0x4000
   check_insn_relo("\x00\x00\x02\x10", 4, false, UC_ARM64_REG_X0, nullptr);
 
