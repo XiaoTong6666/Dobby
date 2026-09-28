@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
     const uint8_t loopnz[] = {0xe0, 0xfe};
     const uint8_t expected[] = {0x9c, 0x48, 0xff, 0xc9, 0x9d, 0xe3, 0x12, 0x75,
                                 0x02, 0xeb, 0x0e, 0xff, 0x25, 0, 0, 0, 0,
-                                0, 0x10, 0, 0, 0, 0, 0};
+                                0, 0, 0x10, 0, 0, 0, 0, 0};
     return Check("LOOPNZ rel8", loopnz, sizeof(loopnz), expected, sizeof(expected)) ? 0 : 1;
   }
   if (argc != 1) return 2;

@@ -41,7 +41,8 @@ int main(int argc, char **argv) {
   }
     return 0;
   }
-  if (strcmp(argv[1], "destroy") != 0) return 2;
+  const bool roundtrip = strcmp(argv[1], "roundtrip") == 0;
+  if (!roundtrip && strcmp(argv[1], "destroy") != 0) return 2;
 
   // Restoring a trampoline into an unmapped original must return failure;
   // otherwise the interceptor registry will incorrectly forget an active hook.
@@ -54,6 +55,17 @@ int main(int argc, char **argv) {
     fprintf(stderr, "fixture could not install a normal hook: rc=%d\n", installed);
     munmap(rw, page);
     return 2;
+  }
+  if (roundtrip) {
+    auto target = reinterpret_cast<Fn>(rw);
+    auto trampoline = reinterpret_cast<Fn>(original);
+    if (target() != 99 || trampoline() != 7 || DobbyDestroy(rw) != RT_SUCCESS || target() != 7) {
+      fprintf(stderr, "hook/original/destroy roundtrip did not preserve behavior\n");
+      munmap(rw, page);
+      return 1;
+    }
+    munmap(rw, page);
+    return 0;
   }
   munmap(rw, page);
   const int destroyed = DobbyDestroy(rw);

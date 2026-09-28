@@ -160,7 +160,7 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
     __ Emit64(orig_insn_ref_addr);
 #endif
   } else if (insn.primary_opcode >= 0xE0 && insn.primary_opcode <= 0xE2) { // LOOPNZ/LOOPZ/LOOP
-    DEBUG_LOG("[x86 relo] %p: loop/loopcc", buffer_cursor);
+    DLOG(0, "[x86 relo] %p: loop/loopcc", buffer_cursor);
 
     int8_t offset = insn.immediate;
     addr_t orig_dst_ip = curr_orig_ip + offset;

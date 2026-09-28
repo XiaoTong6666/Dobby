@@ -1,4 +1,5 @@
 #include "PlatformUnifiedInterface/MemoryAllocator.h"
+#include "MemoryAllocator/NearMemoryAllocator.h"
 #include "TINYSTL/buffer.h"
 
 #include <cstdio>
@@ -38,6 +39,19 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+    return 0;
+  }
+  if (strcmp(argv[1], "near") == 0) {
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    auto *arena = MemoryAllocator::SharedAllocator()->allocateDataMemoryArena(page);
+    if (arena == nullptr) return 2;
+    const uint8_t payload[] = {'D', 'A', 'T', 'A', 0};
+    uint8_t *copy = NearMemoryAllocator::SharedAllocator()->allocateNearDataMemory(
+        const_cast<uint8_t *>(payload), sizeof(payload), arena->addr, page * 2);
+    if (copy == nullptr || memcmp(copy, payload, sizeof(payload)) != 0) {
+      fprintf(stderr, "near data allocator failed to produce writable data\n");
+      return 1;
+    }
     return 0;
   }
   if (strcmp(argv[1], "data") != 0) return 2;
