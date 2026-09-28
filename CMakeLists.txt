@@ -398,6 +398,7 @@ if (DOBBY_REGRESSION_TESTS AND SYSTEM.Linux AND NOT BUILDING_KERNEL)
   add_test(NAME regression_patch_restore_failure COMMAND dobby_regression_patch restore)
   add_test(NAME regression_patch_restore_multiple_pages COMMAND dobby_regression_patch restore-both)
   add_test(NAME regression_patch_prepare_failure COMMAND dobby_regression_patch prepare-fail)
+  add_test(NAME regression_patch_large_scratch COMMAND dobby_regression_patch many)
   add_test(NAME regression_patch_preserve_rw COMMAND dobby_regression_patch rw)
   add_test(NAME regression_patch_mixed_permissions COMMAND dobby_regression_patch mixed)
   add_executable(dobby_regression_maps tests/regression_maps.cpp)
@@ -445,6 +446,18 @@ if (DOBBY_ANDROID_ARM64_REVIEW_TEST)
   endif ()
   add_executable(dobby_android_arm64_review tests/review_android_arm64.cpp)
   target_link_libraries(dobby_android_arm64_review PRIVATE dobby log dl)
+  target_link_options(dobby_android_arm64_review PRIVATE "-Wl,--wrap=mprotect")
+endif ()
+
+# Isolated integration test: hooks libc free(), which may be called inside
+# Dobby's own install path. Keep it out of normal CTest and Android modules.
+option(DOBBY_SELF_HOOK_REVIEW_TEST "Build libc free() self-hook lifecycle regression" OFF)
+if (DOBBY_SELF_HOOK_REVIEW_TEST AND SYSTEM.Linux AND NOT BUILDING_KERNEL)
+  enable_testing()
+  add_executable(dobby_review_self_hook tests/review_self_hook.cpp)
+  target_link_libraries(dobby_review_self_hook PRIVATE dobby dl)
+  add_test(NAME review_self_hook_free COMMAND dobby_review_self_hook)
+  set_tests_properties(review_self_hook_free PROPERTIES TIMEOUT 10)
 endif ()
 
 # ---

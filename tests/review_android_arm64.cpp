@@ -4,6 +4,11 @@
 #include <cstdint>
 #include <cstring>
 #include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <linux/membarrier.h>
+#include <sched.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <vector>
 #include <sys/mman.h>
@@ -27,6 +32,20 @@ static bool is_rw_without_exec(void *address) {
   }
   fclose(maps);
   return found && permissions[0] == 'r' && permissions[1] == 'w' && permissions[2] != 'x';
+}
+
+static std::atomic<uintptr_t> fail_restore_page{0};
+static std::atomic<unsigned> restore_injections{0};
+extern "C" int __real_mprotect(void *, size_t, int);
+extern "C" int __wrap_mprotect(void *address, size_t size, int prot) {
+  uintptr_t watched = fail_restore_page.load(std::memory_order_relaxed);
+  if (watched != 0 && reinterpret_cast<uintptr_t>(address) == watched && prot == (PROT_READ | PROT_EXEC) &&
+      fail_restore_page.compare_exchange_strong(watched, 0)) {
+    restore_injections.fetch_add(1, std::memory_order_relaxed);
+    errno = EACCES;
+    return -1;
+  }
+  return __real_mprotect(address, size, prot);
 }
 
 static bool verify_rw_mapping_remains_rw() {
@@ -62,6 +81,8 @@ extern "C" long review_x17(long);
 extern "C" long review_literal(long);
 extern "C" long review_short(long);
 extern "C" long review_short_neighbor(long);
+extern "C" const uint64_t *review_adr();
+extern "C" long review_overlap(long);
 
 asm(R"(
 .text
@@ -86,6 +107,28 @@ review_literal:
 .size review_literal, .-review_literal
 
 .p2align 4
+.global review_adr
+.type review_adr,%function
+review_adr:
+  adr x0, 1f
+  ret
+1:
+  .quad 0x1020304050607080
+.size review_adr, .-review_adr
+
+.p2align 4
+1:
+  .word 0x11223344
+.global review_overlap
+.type review_overlap,%function
+review_overlap:
+  ldr x0, 1b
+  ret
+  nop
+  nop
+.size review_overlap, .-review_overlap
+
+.p2align 4
 .global review_short
 .type review_short,%function
 review_short:
@@ -108,6 +151,108 @@ static long replacement_literal(long) {
 }
 static long replacement_short(long) {
   return 123;
+}
+
+static int test_restore_failure(bool near, bool required) {
+  uint8_t before[16];
+  memcpy(before, reinterpret_cast<const void *>(review_short), sizeof(before));
+  if (required)
+    dobby_require_near_branch_trampoline(true);
+  else if (near)
+    dobby_enable_near_branch_trampoline();
+  const uintptr_t page =
+      reinterpret_cast<uintptr_t>(review_short) & ~(static_cast<uintptr_t>(sysconf(_SC_PAGESIZE)) - 1);
+  fail_restore_page.store(page, std::memory_order_release);
+  dobby_dummy_func_t original = reinterpret_cast<dobby_dummy_func_t>(1);
+  const int failed = DobbyHook(reinterpret_cast<void *>(review_short),
+                               reinterpret_cast<dobby_dummy_func_t>(replacement_short), &original);
+  fail_restore_page.store(0);
+  const bool rolled_back = failed != RT_SUCCESS && original == nullptr && restore_injections.load() == 1 &&
+                           memcmp(before, reinterpret_cast<const void *>(review_short), sizeof(before)) == 0 &&
+                           review_short(0) == 7 && review_short_neighbor(0) == 31;
+  dobby_dummy_func_t retry_original = nullptr;
+  const int retried = rolled_back ? DobbyHook(reinterpret_cast<void *>(review_short),
+                                              reinterpret_cast<dobby_dummy_func_t>(replacement_short), &retry_original)
+                                  : RT_FAILED;
+  const bool retried_correctly = retried == RT_SUCCESS && retry_original != nullptr &&
+                                 reinterpret_cast<long (*)(long)>(retry_original)(0) == 7 && review_short(0) == 123;
+  const int restored = retried == RT_SUCCESS ? DobbyDestroy(reinterpret_cast<void *>(review_short)) : RT_FAILED;
+  if (near || required)
+    dobby_disable_near_branch_trampoline();
+  const bool ok = rolled_back && retried_correctly && restored == RT_SUCCESS &&
+                  memcmp(before, reinterpret_cast<const void *>(review_short), sizeof(before)) == 0 &&
+                  review_short(0) == 7 && review_short_neighbor(0) == 31;
+  printf("rollback: mode=%s injected=%u failed=%d retried=%d destroyed=%d result=%s\n",
+         required ? "required"
+         : near   ? "near"
+                  : "default",
+         restore_injections.load(), failed, retried, restored, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
+static const uint64_t *replacement_adr() {
+  static uint64_t replacement = 0x123456789;
+  return &replacement;
+}
+
+static int test_adr_inline_data(bool near, bool required) {
+  const auto *source = review_adr();
+  constexpr uint64_t expected = 0x1020304050607080ULL;
+  const bool before = *source == expected;
+  uint8_t entry[16];
+  memcpy(entry, reinterpret_cast<const void *>(review_adr), sizeof(entry));
+  if (required)
+    dobby_require_near_branch_trampoline(true);
+  else if (near)
+    dobby_enable_near_branch_trampoline();
+  dobby_dummy_func_t original = nullptr;
+  int installed =
+      DobbyHook(reinterpret_cast<void *>(review_adr), reinterpret_cast<dobby_dummy_func_t>(replacement_adr), &original);
+  bool correct = installed == RT_SUCCESS && original != nullptr;
+  const uint64_t *relocated_pointer = correct ? reinterpret_cast<const uint64_t *(*)()>(original)() : nullptr;
+  const uint64_t value = relocated_pointer ? *relocated_pointer : 0;
+  const uint64_t source_after = *source;
+  const int destroyed = installed == RT_SUCCESS ? DobbyDestroy(reinterpret_cast<void *>(review_adr)) : RT_FAILED;
+  const bool restored = memcmp(entry, reinterpret_cast<const void *>(review_adr), sizeof(entry)) == 0;
+  if (near || required)
+    dobby_disable_near_branch_trampoline();
+  const bool ok = (!near && !required)
+                      ? before && installed != RT_SUCCESS && original == nullptr && restored &&
+                            source_after == expected && *review_adr() == expected
+                      : before && installed == RT_SUCCESS && relocated_pointer == source && value == expected &&
+                            source_after == expected && destroyed == RT_SUCCESS && restored;
+  printf("adr-data: mode=%s before=%d installed=%d source=%p return=%p expected=0x%llx value=0x%llx "
+         "source_after=0x%llx destroy=%d restored=%d result=%s\n",
+         required ? "required"
+         : near   ? "near"
+                  : "default",
+         before, installed, static_cast<const void *>(source), static_cast<const void *>(relocated_pointer),
+         static_cast<unsigned long long>(expected), static_cast<unsigned long long>(value),
+         static_cast<unsigned long long>(source_after), destroyed, restored, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
+static int test_literal_left_overlap(bool near, bool required) {
+  const uint64_t expected = static_cast<uint64_t>(review_overlap(0));
+  if (required)
+    dobby_require_near_branch_trampoline(true);
+  else if (near)
+    dobby_enable_near_branch_trampoline();
+  dobby_dummy_func_t original = nullptr;
+  const int installed = DobbyHook(reinterpret_cast<void *>(review_overlap),
+                                  reinterpret_cast<dobby_dummy_func_t>(replacement_literal), &original);
+  const uint64_t actual = original ? static_cast<uint64_t>(reinterpret_cast<long (*)(long)>(original)(0)) : 0;
+  const int destroyed = installed == RT_SUCCESS ? DobbyDestroy(reinterpret_cast<void *>(review_overlap)) : RT_FAILED;
+  if (near || required)
+    dobby_disable_near_branch_trampoline();
+  const bool ok = installed == RT_SUCCESS && actual == expected && destroyed == RT_SUCCESS;
+  printf("literal-left-overlap: mode=%s installed=%d expected=0x%llx actual=0x%llx destroy=%d result=%s\n",
+         required ? "required"
+         : near   ? "near"
+                  : "default",
+         installed, static_cast<unsigned long long>(expected), static_cast<unsigned long long>(actual), destroyed,
+         ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
 }
 
 static int test_concurrent_execution() {
@@ -157,6 +302,105 @@ static int test_concurrent_execution() {
   const bool ok = errors == 0 && unexpected == 0 && installs == 120 && calls.load() > 0 && review_short(0) == 7;
   printf("execute-race installs=%u calls=%llu unexpected=%u errors=%u result=%s\n", installs,
          static_cast<unsigned long long>(calls.load()), unexpected.load(), errors, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
+static int test_cross_core_instruction_visibility() {
+  // Unlike the live execute-race test (which accepts old OR new behavior
+  // during the mutation), this checks the exact result on *other* CPUs after
+  // each install/remove API returns. Kernel sync-core membarrier is a separate
+  // architectural requirement from an aligned atomic instruction store.
+  const long supported = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+  const int required = MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+  if (supported < 0 || (supported & required) != required) {
+    printf("cross-core: sync-core membarrier unsupported query=%ld\n", supported);
+    return 2;
+  }
+  cpu_set_t allowed;
+  CPU_ZERO(&allowed);
+  if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0)
+    return 2;
+  int cores[2] = {-1, -1};
+  for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &allowed)) {
+      cores[cores[0] < 0 ? 0 : 1] = cpu;
+      if (cores[1] >= 0)
+        break;
+    }
+  }
+  if (cores[1] < 0) {
+    printf("cross-core: fewer than two allowed CPUs\n");
+    return 2;
+  }
+  dobby_require_near_branch_trampoline(true);
+  constexpr unsigned kWorkers = 2;
+  constexpr unsigned kPhases = 160;
+  std::atomic<unsigned> epoch{0}, completed{0}, errors{0}, pinned{0};
+  std::atomic<bool> done{false};
+  std::vector<std::thread> readers;
+  for (unsigned id = 0; id < kWorkers; ++id) {
+    readers.emplace_back([&, id] {
+      cpu_set_t selected;
+      CPU_ZERO(&selected);
+      CPU_SET(cores[id], &selected);
+      if (sched_setaffinity(0, sizeof(selected), &selected) == 0)
+        pinned.fetch_add(1, std::memory_order_release);
+      else
+        errors.fetch_add(1, std::memory_order_relaxed);
+      unsigned previous = 0;
+      while (!done.load(std::memory_order_acquire)) {
+        const unsigned current = epoch.load(std::memory_order_acquire);
+        if (current == previous) {
+          std::this_thread::yield();
+          continue;
+        }
+        previous = current;
+        const long expected = (current & 1u) ? 123 : 7;
+        if (review_short(0) != expected)
+          errors.fetch_add(1, std::memory_order_relaxed);
+        completed.fetch_add(1, std::memory_order_release);
+      }
+    });
+  }
+  unsigned phases = 0;
+  bool hooked = false;
+  for (unsigned phase = 1; phase <= kPhases; ++phase) {
+    if (phase & 1u) {
+      dobby_dummy_func_t original = nullptr;
+      if (DobbyHook(reinterpret_cast<void *>(review_short), reinterpret_cast<dobby_dummy_func_t>(replacement_short),
+                    &original) != RT_SUCCESS ||
+          !original || reinterpret_cast<long (*)(long)>(original)(0) != 7) {
+        errors.fetch_add(1);
+        break;
+      }
+      hooked = true;
+    } else {
+      if (DobbyDestroy(reinterpret_cast<void *>(review_short)) != RT_SUCCESS) {
+        errors.fetch_add(1);
+        break;
+      }
+      hooked = false;
+    }
+    completed.store(0, std::memory_order_relaxed);
+    epoch.store(phase, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (completed.load(std::memory_order_acquire) < kWorkers && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    if (completed.load(std::memory_order_acquire) != kWorkers) {
+      errors.fetch_add(1);
+      break;
+    }
+    ++phases;
+  }
+  done.store(true, std::memory_order_release);
+  for (auto &reader : readers)
+    reader.join();
+  if (hooked && DobbyDestroy(reinterpret_cast<void *>(review_short)) != RT_SUCCESS)
+    errors.fetch_add(1);
+  dobby_disable_near_branch_trampoline();
+  const bool ok = errors == 0 && pinned == kWorkers && phases == kPhases && review_short(0) == 7;
+  printf("cross-core: sync_core=1 pinned=%u cores=%d,%d phases=%u errors=%u result=%s\n", pinned.load(), cores[0],
+         cores[1], phases, errors.load(), ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }
 
@@ -280,8 +524,28 @@ template <typename T> static bool roundtrip(const char *name, T target, T replac
 
 int main(int argc, char **argv) {
   setbuf(stdout, nullptr);
+  if (argc > 1 && strcmp(argv[1], "adr-data") == 0)
+    return test_adr_inline_data(false, false);
+  if (argc > 1 && strcmp(argv[1], "adr-data-near") == 0)
+    return test_adr_inline_data(true, false);
+  if (argc > 1 && strcmp(argv[1], "adr-data-required") == 0)
+    return test_adr_inline_data(true, true);
+  if (argc > 1 && strcmp(argv[1], "literal-left-overlap") == 0)
+    return test_literal_left_overlap(false, false);
+  if (argc > 1 && strcmp(argv[1], "literal-left-overlap-near") == 0)
+    return test_literal_left_overlap(true, false);
+  if (argc > 1 && strcmp(argv[1], "literal-left-overlap-required") == 0)
+    return test_literal_left_overlap(true, true);
+  if (argc > 1 && strcmp(argv[1], "rollback-default") == 0)
+    return test_restore_failure(false, false);
+  if (argc > 1 && strcmp(argv[1], "rollback-near") == 0)
+    return test_restore_failure(true, false);
+  if (argc > 1 && strcmp(argv[1], "rollback-required") == 0)
+    return test_restore_failure(true, true);
   if (argc > 1 && strcmp(argv[1], "execute-race") == 0)
     return test_concurrent_execution();
+  if (argc > 1 && strcmp(argv[1], "cross-core") == 0)
+    return test_cross_core_instruction_visibility();
   if (argc > 1 && strcmp(argv[1], "reservation") == 0)
     return check_reserved_neighbor_pages(false);
   if (argc > 1 && strcmp(argv[1], "reservation-owned-gap") == 0)

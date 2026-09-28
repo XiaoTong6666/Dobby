@@ -61,18 +61,21 @@ int main(int argc, char **argv) {
   const bool mixed = strcmp(argv[1], "mixed") == 0;
   const bool prepare_fail = strcmp(argv[1], "prepare-fail") == 0;
   const bool restore_both = strcmp(argv[1], "restore-both") == 0;
-  if (!three && !restore && !rw && !mixed && !prepare_fail && !restore_both && strcmp(argv[1], "two") != 0)
+  const bool many = strcmp(argv[1], "many") == 0;
+  if (!three && !restore && !rw && !mixed && !prepare_fail && !restore_both && !many && strcmp(argv[1], "two") != 0)
     return 2;
-  uint8_t *mapped = static_cast<uint8_t *>(mmap(nullptr, page * 4, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  const size_t mapping_size = page * (many ? 72 : 4);
+  uint8_t *mapped =
+      static_cast<uint8_t *>(mmap(nullptr, mapping_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
   if (mapped == MAP_FAILED) return 2;
-  memset(mapped, 0x90, page * 4);
-  if (mprotect(mapped, page * 4, PROT_READ | PROT_EXEC) != 0) return 2;
-  if (rw && mprotect(mapped, page * 4, PROT_READ | PROT_WRITE) != 0)
+  memset(mapped, 0x90, mapping_size);
+  if (mprotect(mapped, mapping_size, PROT_READ | PROT_EXEC) != 0)
+    return 2;
+  if (rw && mprotect(mapped, mapping_size, PROT_READ | PROT_WRITE) != 0)
     return 2;
   if (mixed && mprotect(mapped + page, page, PROT_READ | PROT_WRITE) != 0)
     return 2;
-  const size_t size = (three || prepare_fail) ? page + 16 : 16;
+  const size_t size = many ? page * 68 + 16 : (three || prepare_fail) ? page + 16 : 16;
   std::vector<uint8_t> contents(size, 0xCC);
   if (restore) fail_rx_restore = true;
   if (restore_both)
@@ -100,6 +103,12 @@ int main(int argc, char **argv) {
   if (mixed && (PagePermissions(target) != (PROT_READ | PROT_EXEC) ||
                 PagePermissions(mapped + page) != (PROT_READ | PROT_WRITE))) {
     fprintf(stderr, "mixed page permissions were not retained\n");
+    return 1;
+  }
+  if (many && (PagePermissions(target) != (PROT_READ | PROT_EXEC) ||
+               PagePermissions(mapped + 35 * page) != (PROT_READ | PROT_EXEC) ||
+               PagePermissions(mapped + 69 * page) != (PROT_READ | PROT_EXEC))) {
+    fprintf(stderr, "large cross-page patch lost original page protections\n");
     return 1;
   }
   if (prepare_fail || restore_both) {
