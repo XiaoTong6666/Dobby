@@ -372,6 +372,7 @@ if (BUILD_EXAMPLE AND (NOT BUILDING_KERNEL))
 endif ()
 
 if (BUILD_TEST AND (NOT BUILDING_KERNEL))
+  enable_testing()
   add_subdirectory(tests)
 endif ()
 

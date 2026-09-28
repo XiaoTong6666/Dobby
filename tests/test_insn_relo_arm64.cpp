@@ -43,14 +43,51 @@ tbz x0, #0, #0x4000
 int main(int argc, char **argv) {
   set_global_arch("arm64");
 
+  auto check_x17 = ^(UniconEmulator *orig, UniconEmulator *relo) {
+    assert(orig->readRegister(UC_ARM64_REG_X17) == relo->readRegister(UC_ARM64_REG_X17));
+    assert(orig->getFaultAddr() == relo->getFaultAddr());
+  };
+
   if (argc == 2 && strcmp(argv[1], "--x17-branch") == 0) {
     // A taken conditional branch must not clobber an otherwise-live x17.
     // Both paths fault at the same unmapped target; compare the saved register.
-    check_insn_relo("\x00\x00\x80\xd2\x1f\x00\x00\xf1\x00\x00\x02\x54", 12,
-                    false, -1, ^(UniconEmulator *orig, UniconEmulator *relo) {
-                      assert(orig->readRegister(UC_ARM64_REG_X17) ==
-                             relo->readRegister(UC_ARM64_REG_X17));
-                    });
+    check_insn_relo("\x00\x00\x80\xd2\x1f\x00\x00\xf1\x00\x00\x02\x54", 12, false, -1, check_x17, 0,
+                    0x172435465768798aULL);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "--x17-matrix") == 0) {
+    constexpr uintptr_t live = 0x172435465768798aULL;
+    // Non-fallthrough B and BL, both CBZ directions, TBZ and a taken B.cond.
+    check_insn_relo("\x00\x10\x00\x14", 4, false, -1, check_x17, 0, live);
+    check_insn_relo("\x00\x10\x00\x94", 4, false, -1, check_x17, 0, live);
+    check_insn_relo("\x00\x00\x80\xd2\x00\x00\x02\xb4", 8, false, -1, check_x17, 0, live);
+    check_insn_relo("\x20\x00\x80\xd2\x00\x00\x02\xb4", 8, false, -1, check_x17, 0, live);
+    check_insn_relo("\x60\x01\x80\xd2\x00\x00\x12\x36", 8, false, -1, check_x17, 0, live);
+    check_insn_relo("\x00\x00\x80\xd2\x1f\x00\x00\xf1\x00\x00\x02\x54", 12, false, -1, check_x17, 0, live);
+    // A faulting literal load must not alter any unrelated GPR beforehand.
+    check_insn_relo("\x00\x00\x02\x58", 4, false, -1, check_x17, 0, live);
+    // The raw literal instruction must preserve its destination even when it
+    // is x17: the emulated access faults before any destination write.
+    check_insn_relo("\x11\x00\x02\x58", 4, false, -1, check_x17, 0, live);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "--intra-prologue") == 0) {
+    // The original branch skips to a still-stolen instruction. Redirecting it
+    // to the already-patched entry would recurse rather than continue.
+    check_insn_relo("\x01\x00\x00\x14\x20\x00\x80\xd2", 8, false, UC_ARM64_REG_X0, nullptr);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "--out-of-range") == 0) {
+    // No scratch-register fallback: both classes must fail closed if a
+    // synthetic relocated PC cannot reach the original control/data target.
+    const unsigned char branch[] = {0x01, 0x00, 0x00, 0x14};
+    const unsigned char literal[] = {0x00, 0x00, 0x00, 0x58};
+    for (auto code : {branch, literal}) {
+      CodeMemBlock original(0x10000000, 4);
+      CodeMemBlock relocated(0x30000000, 0x1000);
+      GenRelocateCode(const_cast<unsigned char *>(code), &original, &relocated, false);
+      assert(relocated.addr == 0 && relocated.size == 0);
+    }
     return 0;
   }
 

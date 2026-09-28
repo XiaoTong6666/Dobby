@@ -2,10 +2,21 @@
 
 #include "UniconEmulator.h"
 
-int main() {
+int main(int argc, char **argv) {
   log_set_level(0);
   set_global_arch("x86_64");
 
+  if (argc == 2 && strcmp(argv[1], "--unreachable-rip") == 0) {
+    // A deliberately unreal low source address has no near executable
+    // allocation in this host process. Return an empty relocation instead of
+    // emitting a JMP [RIP] whose literal target is null.
+    alignas(4) uint8_t bytes[] = {0x48, 0x8d, 0x05, 0, 0, 0, 0};
+    CodeMemBlock original(0x1000, sizeof(bytes));
+    CodeMemBlock relocated;
+    GenRelocateCode(bytes, &original, &relocated, false);
+    assert(relocated.addr == 0 && relocated.size == 0);
+    return 0;
+  }
 
   // cmp eax, eax
   // jz -0x20

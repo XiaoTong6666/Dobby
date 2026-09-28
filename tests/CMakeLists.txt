@@ -111,6 +111,31 @@ target_link_libraries(test_insn_relo_x64 PUBLIC
   ${UNICORN_LIBRARIES}
   )
 
+# The existing emulator callbacks use Clang Blocks, not C++ lambdas.
+foreach (relo_test test_insn_relo_arm64 test_insn_relo_arm test_insn_relo_x64)
+  target_compile_options(${relo_test} PRIVATE -fblocks)
+endforeach ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_library(BLOCKS_RUNTIME_LIBRARY NAMES BlocksRuntime)
+  if (BLOCKS_RUNTIME_LIBRARY)
+    foreach (relo_test test_insn_relo_arm64 test_insn_relo_arm test_insn_relo_x64)
+      target_link_libraries(${relo_test} PUBLIC ${BLOCKS_RUNTIME_LIBRARY})
+    endforeach ()
+  endif ()
+endif ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_test(NAME unicorn_arm64 COMMAND test_insn_relo_arm64)
+  add_test(NAME unicorn_arm64_x17 COMMAND test_insn_relo_arm64 --x17-branch)
+  add_test(NAME unicorn_arm64_x17_matrix COMMAND test_insn_relo_arm64 --x17-matrix)
+  add_test(NAME unicorn_arm64_intra_prologue COMMAND test_insn_relo_arm64 --intra-prologue)
+  add_test(NAME unicorn_arm64_out_of_range COMMAND test_insn_relo_arm64 --out-of-range)
+  add_test(NAME unicorn_arm32_thumb COMMAND test_insn_relo_arm)
+  add_test(NAME unicorn_x64_rip COMMAND test_insn_relo_x64)
+  add_test(NAME unicorn_x64_unreachable_rip COMMAND test_insn_relo_x64 --unreachable-rip)
+endif ()
+
 # ---
 
 add_executable(test_native

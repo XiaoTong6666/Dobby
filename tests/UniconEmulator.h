@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <unordered_map>
+#include <vector>
 
 class CapstoneDisassembler {
 public:
@@ -29,6 +30,8 @@ public:
   UniconEmulator(const std::string &arch);
 
   void mapMemory(uintptr_t addr, char *buffer, size_t buffer_size);
+  void mapAuxMemory(uintptr_t addr, char *buffer, size_t buffer_size);
+  bool isAuxCode(uintptr_t address) const;
 
   void *readRegister(int regId);
 
@@ -65,9 +68,11 @@ private:
   uc_err err_;
   uc_engine *uc_;
   uintptr_t unmapped_addr_;
+  std::vector<std::pair<uintptr_t, uintptr_t>> aux_code_ranges_;
 };
 
 void set_global_arch(std::string arch);
 
 void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, int check_reg_id,
-                     void (^callback)(UniconEmulator *orig, UniconEmulator *relo), uintptr_t relo_stop_size = 0);
+                     void (^callback)(UniconEmulator *orig, UniconEmulator *relo), uintptr_t relo_stop_size = 0,
+                     uintptr_t initial_x17 = 0);

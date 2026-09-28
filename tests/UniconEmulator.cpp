@@ -1,6 +1,8 @@
 #include "UniconEmulator.h"
 #include "PlatformUnifiedInterface/MemoryAllocator.h"
 #include "InstructionRelocation/InstructionRelocation.h"
+#include <sys/mman.h>
+#include <unistd.h>
 
 // align
 #ifndef ALIGN
@@ -69,7 +71,7 @@ static void hook_trace_insn(uc_engine *uc, uint64_t address, uint32_t size, void
   err = uc_mem_read(uc, address, insn_bytes, size);
   assert(err == UC_ERR_OK);
 
-  if (address >= emu->end_) {
+  if (address >= emu->end_ && !emu->isAuxCode(address)) {
     emu->stop();
     return;
   }
@@ -123,11 +125,24 @@ UniconEmulator::UniconEmulator(const std::string &arch) {
 void UniconEmulator::mapMemory(uintptr_t addr, char *buffer, size_t buffer_size) {
   uc_err err = UC_ERR_OK;
   uintptr_t map_addr = ALIGN_FLOOR(addr, 0x1000);
-  size_t map_size = ALIGN_CEIL(buffer_size, 0x1000);
+  size_t map_size = ALIGN_CEIL(addr + buffer_size, 0x1000) - map_addr;
   err = uc_mem_map(uc_, map_addr, map_size, UC_PROT_ALL);
   assert(err == UC_ERR_OK);
   err = uc_mem_write(uc_, addr, buffer, buffer_size);
   assert(err == UC_ERR_OK);
+}
+
+void UniconEmulator::mapAuxMemory(uintptr_t addr, char *buffer, size_t buffer_size) {
+  mapMemory(addr, buffer, buffer_size);
+  aux_code_ranges_.push_back({addr, addr + buffer_size});
+}
+
+bool UniconEmulator::isAuxCode(uintptr_t address) const {
+  for (const auto &region : aux_code_ranges_) {
+    if (address >= region.first && address < region.second)
+      return true;
+  }
+  return false;
 }
 
 void *UniconEmulator::readRegister(int regId) {
@@ -166,7 +181,8 @@ void UniconEmulator::emulate(uintptr_t addr, uintptr_t end, char *buffer, size_t
 }
 
 void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, int check_reg_id,
-                     void (^callback)(UniconEmulator *orig, UniconEmulator *relo), uintptr_t relo_stop_size) {
+                     void (^callback)(UniconEmulator *orig, UniconEmulator *relo), uintptr_t relo_stop_size,
+                     uintptr_t initial_x17) {
   auto *orig_ue = new UniconEmulator(g_arch);
   auto *relo_ue = new UniconEmulator(g_arch);
 
@@ -178,15 +194,28 @@ void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, in
     relocate_addr = 0x10024000;
   }
 
+  void *host_source = nullptr;
+  if (g_arch == "x86_64" && buffer_size >= 7 && static_cast<uint8_t>(buffer[0]) == 0x48 &&
+      (static_cast<uint8_t>(buffer[1]) == 0x8d || static_cast<uint8_t>(buffer[1]) == 0x8b) &&
+      static_cast<uint8_t>(buffer[2]) == 0x05) {
+    // RIP-relative rewrites allocate a secondary stub in the *host* address
+    // space. Use an actual mapped source address so near allocation is real,
+    // then separately map the stub's bytes into Unicorn at that address.
+    host_source = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(host_source != MAP_FAILED);
+    memcpy(host_source, buffer, buffer_size);
+    orig_addr = reinterpret_cast<addr_t>(host_source);
+    relocate_addr = orig_addr + 0x10000;
+  }
+
   //  auto dism = CapstoneDisassembler::Get("arm64");
   //  dism->disassemble((uintptr_t)orig_addr, buffer, buffer_size);
   //  printf("\n");
 
   auto origin = new CodeMemBlock(orig_addr, buffer_size);
   auto relocated = new CodeMemBlock(relocate_addr, 0x1000);
-  if (g_arch == "thumb") {
-    origin->reset(origin->addr + 1, origin->size);
-  }
+  // Dobby's origin block contains the aligned code address; only the input
+  // buffer pointer carries the Thumb tag. Production routing does the same.
 
   // The relocation API encodes Thumb mode in bit 0 of the input pointer.
   // String literal addresses have arbitrary parity: using one directly can
@@ -199,9 +228,25 @@ void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, in
     relocation_input = aligned_code + 1;
   GenRelocateCode(relocation_input, origin, relocated, false);
 
+  if (host_source != nullptr && relocated->size >= 14) {
+    auto *bytes = reinterpret_cast<uint8_t *>(relocated->addr);
+    assert(bytes[0] == 0xff && bytes[1] == 0x25);
+    uintptr_t near_stub = 0;
+    memcpy(&near_stub, bytes + 6, sizeof(near_stub));
+    assert(near_stub != 0);
+    // One source instruction followed by the 14-byte jump back to the main
+    // relocation sequence. The emulator cannot read this host mapping until
+    // we explicitly register it in its virtual address space.
+    relo_ue->mapAuxMemory(near_stub, reinterpret_cast<char *>(near_stub), buffer_size + 14);
+  }
+
   if (g_arch == "thumb") {
     orig_ue->writeRegister(UC_ARM_REG_CPSR, (void *)0x20);
     relo_ue->writeRegister(UC_ARM_REG_CPSR, (void *)0x20);
+  }
+  if (g_arch == "arm64" && initial_x17 != 0) {
+    orig_ue->writeRegister(UC_ARM64_REG_X17, reinterpret_cast<void *>(initial_x17));
+    relo_ue->writeRegister(UC_ARM64_REG_X17, reinterpret_cast<void *>(initial_x17));
   }
   orig_ue->emulate(orig_addr, 0, buffer, buffer_size);
   if (g_arch == "thumb") {
@@ -225,4 +270,6 @@ void check_insn_relo(char *buffer, size_t buffer_size, bool check_fault_addr, in
 
   delete orig_ue;
   delete relo_ue;
+  if (host_source != nullptr)
+    munmap(host_source, 0x1000);
 }
