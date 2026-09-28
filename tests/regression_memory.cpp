@@ -54,6 +54,16 @@ int main(int argc, char **argv) {
     }
     return 0;
   }
+  if (strcmp(argv[1], "near-fail") == 0) {
+    const uint8_t payload[] = {0x90, 0x90, 0x90, 0x90};
+    auto *allocation = NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(const_cast<uint8_t *>(payload),
+                                                                                      sizeof(payload), 0x1000, 0);
+    if (allocation != nullptr) {
+      fprintf(stderr, "an impossible near allocation unexpectedly succeeded\n");
+      return 1;
+    }
+    return 0;
+  }
   if (strcmp(argv[1], "exec-align") == 0) {
     auto *first = MemoryAllocator::SharedAllocator()->allocateExecBlock(10);
     auto *second = MemoryAllocator::SharedAllocator()->allocateExecBlock(14);

@@ -23,6 +23,32 @@ static bool Check(const char *name, const uint8_t *original, size_t original_siz
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "sse") == 0) {
+    struct Sample {
+      const char *name;
+      uint8_t bytes[15];
+      uint32_t length;
+      uint8_t displacement;
+    };
+    const Sample samples[] = {
+        {"movups rip", {0x0f, 0x10, 0x05, 0x10, 0, 0, 0}, 7, 3},
+        {"movss rip", {0xf3, 0x0f, 0x10, 0x05, 0x10, 0, 0, 0}, 8, 4},
+        {"movdqa register", {0x66, 0x0f, 0x6f, 0xc0}, 4, 0},
+        {"movups stack", {0x0f, 0x10, 0x44, 0x24, 0x10}, 5, 4},
+    };
+    for (const auto &s : samples) {
+      x86_insn_decode_t decoded = {};
+      x86_options_t options = {};
+      options.mode = 64;
+      x86_insn_decode(&decoded, const_cast<uint8_t *>(s.bytes), &options);
+      if (decoded.length != s.length || decoded.displacement_offset != s.displacement) {
+        fprintf(stderr, "%s: len=%u displacement=%u expected=%u/%u\n", s.name, decoded.length,
+                decoded.displacement_offset, s.length, s.displacement);
+        return 1;
+      }
+    }
+    return 0;
+  }
   if (argc == 2 && strcmp(argv[1], "loopnz") == 0) {
     // LOOPNZ -2 decrements RCX while preserving FLAGS and loops to its own PC.
     const uint8_t loopnz[] = {0xe0, 0xfe};
