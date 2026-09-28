@@ -27,7 +27,10 @@ AssemblyCode *AssemblyCodeBuilder::FinalizeFromTurboAssembler(AssemblerBase *ass
   }
 
   // Realize the buffer code to the executable memory address, remove the external label, etc
-  DobbyCodePatch((void *)realized_addr, buffer->GetBuffer(), buffer->GetBufferSize());
+  if (DobbyCodePatch((void *)realized_addr, buffer->GetBuffer(), buffer->GetBufferSize()) !=
+      kMemoryOperationSuccess) {
+    return nullptr;
+  }
 
   auto block = new AssemblyCode(realized_addr, buffer->GetBufferSize());
   return block;

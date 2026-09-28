@@ -228,7 +228,9 @@ uint8_t *NearMemoryAllocator::allocateNearDataMemory(uint32_t size, addr_t pos, 
 
 uint8_t *NearMemoryAllocator::allocateNearDataMemory(uint8_t *buffer, uint32_t buffer_size, addr_t pos,
                                                      size_t search_range) {
-  auto mem = allocateNearExecMemory(buffer_size, pos, search_range);
+  auto mem = allocateNearDataMemory(buffer_size, pos, search_range);
+  if (mem == nullptr)
+    return nullptr;
   memcpy(mem, buffer, buffer_size);
   return mem;
 }

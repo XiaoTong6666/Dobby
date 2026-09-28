@@ -391,6 +391,7 @@ if (DOBBY_REGRESSION_TESTS AND SYSTEM.Linux AND NOT BUILDING_KERNEL)
     add_executable(dobby_regression_x64 tests/regression_x64.cpp)
     target_link_libraries(dobby_regression_x64 PRIVATE dobby)
     add_test(NAME regression_x64 COMMAND dobby_regression_x64)
+    add_test(NAME regression_x64_loopnz COMMAND dobby_regression_x64 loopnz)
   endif ()
 endif ()
 

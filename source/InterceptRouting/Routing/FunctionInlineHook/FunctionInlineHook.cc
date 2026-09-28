@@ -43,16 +43,16 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
     return RS_FAILED;
   }
 
-  // set origin func entry with as relocated instructions
-  if (origin_func) {
-    *origin_func = (dobby_dummy_func_t)entry->relocated_addr;
-  }
-
   if (!routing->Commit()) {
     return RS_FAILED;
   }
 
   Interceptor::SharedInstance()->add(entry);
+
+  // Do not publish a trampoline for a hook that did not install successfully.
+  if (origin_func) {
+    *origin_func = (dobby_dummy_func_t)entry->relocated_addr;
+  }
 
   return RS_SUCCESS;
 }

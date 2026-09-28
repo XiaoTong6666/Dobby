@@ -85,7 +85,7 @@ DataMemBlock *MemoryAllocator::allocateDataBlock(uint32_t size) {
   }
   if (!block) {
     // allocate new arena
-    auto arena = allocateCodeMemoryArena(size);
+    auto arena = allocateDataMemoryArena(size);
     block = arena->allocMemBlock(size);
     CHECK_NOT_NULL(block);
   }

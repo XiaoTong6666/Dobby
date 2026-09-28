@@ -22,7 +22,16 @@ static bool Check(const char *name, const uint8_t *original, size_t original_siz
   return ok;
 }
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "loopnz") == 0) {
+    // LOOPNZ -2 decrements RCX while preserving FLAGS and loops to its own PC.
+    const uint8_t loopnz[] = {0xe0, 0xfe};
+    const uint8_t expected[] = {0x9c, 0x48, 0xff, 0xc9, 0x9d, 0xe3, 0x12, 0x75,
+                                0x02, 0xeb, 0x0e, 0xff, 0x25, 0, 0, 0, 0,
+                                0, 0x10, 0, 0, 0, 0, 0};
+    return Check("LOOPNZ rel8", loopnz, sizeof(loopnz), expected, sizeof(expected)) ? 0 : 1;
+  }
+  if (argc != 1) return 2;
   // JZ/JNZ must retain the short Jcc opcode rather than the 0F 8x near-Jcc opcode.
   const uint8_t jz[] = {0x74, 0x02};
   const uint8_t jz_expected[] = {0x74, 0x02, 0xeb, 0x0e, 0xff, 0x25, 0, 0, 0, 0, 0x04, 0x00, 0x10, 0, 0, 0, 0, 0};

@@ -60,6 +60,8 @@ int GenRelocateCodeFixed(void *buffer, CodeMemBlock *origin, CodeMemBlock *reloc
   // generate executable code
   {
     auto code = AssemblyCodeBuilder::FinalizeFromTurboAssembler(&turbo_assembler_);
+    if (code == nullptr)
+      return RT_FAILED;
     relocated->reset(code->addr, code->size);
     delete code;
   }
