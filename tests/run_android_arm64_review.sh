@@ -30,6 +30,7 @@ for mode in default near required adr-data adr-data-near adr-data-required \
             adr-left-overlap adr-left-overlap-near \
             literal-left-overlap literal-left-overlap-near literal-left-overlap-required \
             rollback-default rollback-near rollback-required \
+            transaction transaction-rollback \
             short reservation reservation-owned-gap cross-core execute-race; do
   if ! output=$(adb -s "$serial" shell "$remote" "$mode" 2>&1); then
     printf 'FAILED %s\n%s\n' "$mode" "$output" >&2
@@ -51,4 +52,13 @@ if ! grep -q 'result=PASS' <<<"$output" || grep -q 'result=FAIL' <<<"$output"; t
   exit 1
 fi
 printf 'PASS %-24s %s\n' 'sync-failure' "$output"
+if ! output=$(adb -s "$serial" shell "$sync_remote" --unsupported 2>&1); then
+  printf 'FAILED sync-unsupported\n%s\n' "$output" >&2
+  exit 1
+fi
+if ! grep -q 'result=PASS' <<<"$output" || grep -q 'result=FAIL' <<<"$output"; then
+  printf 'FAILED sync-unsupported\n%s\n' "$output" >&2
+  exit 1
+fi
+printf 'PASS %-24s %s\n' 'sync-unsupported' "$output"
 echo "ALL_ANDROID_REVIEW_MODES_PASSED"

@@ -174,6 +174,64 @@ static long replacement_short(long) {
   return 123;
 }
 
+static std::atomic<dobby_dummy_func_t> g_transaction_backup{nullptr};
+static long replacement_transaction(long value) {
+  const auto original = reinterpret_cast<long (*)(long)>(g_transaction_backup.load(std::memory_order_acquire));
+  return original ? original(value) + 116 : -1000;
+}
+
+static int test_transaction_api(bool rollback) {
+  uint8_t before[16];
+  memcpy(before, reinterpret_cast<const void *>(review_short), sizeof(before));
+  DobbyHookOptions options = {sizeof(options),
+                              DOBBY_BRANCH_REQUIRE_NEAR,
+                              DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE,
+                              0,
+                              reinterpret_cast<void *>(review_short),
+                              reinterpret_cast<dobby_dummy_func_t>(replacement_transaction)};
+  DobbyHookResult result = {sizeof(result)};
+  bool ok = DobbyPrepareHook(&options, &result) == RS_SUCCESS && result.status == DOBBY_HOOK_OK && result.handle &&
+            result.original && result.patch_size == 4 && result.selected_branch == DOBBY_BRANCH_REQUIRE_NEAR &&
+            review_short(0) == 7 && reinterpret_cast<long (*)(long)>(result.original)(0) == 7 &&
+            memcmp(before, reinterpret_cast<const void *>(review_short), sizeof(before)) == 0;
+  if (!ok) {
+    printf("transaction-arm64: mode=%s prepare_status=%u result=FAIL\n", rollback ? "rollback" : "roundtrip",
+           result.status);
+    return 1;
+  }
+  const DobbyHookHandle ticket = result.handle;
+  g_transaction_backup.store(result.original, std::memory_order_release);
+  dobby_dummy_func_t legacy_backup = reinterpret_cast<dobby_dummy_func_t>(1);
+  ok &= DobbyHook(reinterpret_cast<void *>(review_short), reinterpret_cast<dobby_dummy_func_t>(replacement_short),
+                  &legacy_backup) == RS_FAILED &&
+        legacy_backup == nullptr;
+  if (rollback) {
+    const uintptr_t page =
+        reinterpret_cast<uintptr_t>(review_short) & ~(static_cast<uintptr_t>(sysconf(_SC_PAGESIZE)) - 1);
+    fail_restore_page.store(page, std::memory_order_release);
+  }
+  const int committed = DobbyCommitHook(ticket, &result);
+  fail_restore_page.store(0, std::memory_order_release);
+  if (rollback) {
+    ok &= committed == RS_FAILED && result.status == DOBBY_HOOK_PATCH_FAILED && result.restored_and_synchronized &&
+          result.ever_published && result.handle == 0 && review_short(0) == 7 &&
+          memcmp(before, reinterpret_cast<const void *>(review_short), sizeof(before)) == 0;
+  } else {
+    ok &= committed == RS_SUCCESS && result.status == DOBBY_HOOK_OK && result.handle == ticket &&
+          review_short(0) == 123 && reinterpret_cast<long (*)(long)>(result.original)(0) == 7 &&
+          memcmp(before + 4, reinterpret_cast<const uint8_t *>(review_short) + 4, 12) == 0;
+    DobbyHookResult removed = {sizeof(removed)};
+    ok &= DobbyDestroyHook(ticket, &removed) == RS_SUCCESS && removed.restored_and_synchronized &&
+          review_short(0) == 7 && memcmp(before, reinterpret_cast<const void *>(review_short), sizeof(before)) == 0;
+  }
+  DobbyHookResult stale = {sizeof(stale)};
+  ok &= DobbyCommitHook(ticket, &stale) == RS_FAILED && stale.status == DOBBY_HOOK_INVALID_HANDLE;
+  g_transaction_backup.store(nullptr);
+  printf("transaction-arm64: mode=%s committed=%d state=%u stale=%u result=%s\n", rollback ? "rollback" : "roundtrip",
+         committed, result.status, stale.status, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 static int test_restore_failure(bool near, bool required) {
   uint8_t before[16];
   memcpy(before, reinterpret_cast<const void *>(review_short), sizeof(before));
@@ -593,6 +651,10 @@ int main(int argc, char **argv) {
     return test_restore_failure(true, false);
   if (argc > 1 && strcmp(argv[1], "rollback-required") == 0)
     return test_restore_failure(true, true);
+  if (argc > 1 && strcmp(argv[1], "transaction") == 0)
+    return test_transaction_api(false);
+  if (argc > 1 && strcmp(argv[1], "transaction-rollback") == 0)
+    return test_transaction_api(true);
   if (argc > 1 && strcmp(argv[1], "execute-race") == 0)
     return test_concurrent_execution();
   if (argc > 1 && strcmp(argv[1], "cross-core") == 0)
