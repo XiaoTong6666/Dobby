@@ -33,18 +33,23 @@ CodeMemoryArena *MemoryAllocator::allocateCodeMemoryArena(uint32_t size) {
 }
 
 CodeMemBlock *MemoryAllocator::allocateExecBlock(uint32_t size) {
+  // ARM and ARM64 instructions require 4-byte alignment. Preserve that
+  // alignment between successive variable-sized allocations in an arena.
+  if (size == 0 || size > UINT32_MAX - 3)
+    return nullptr;
+  const uint32_t aligned_size = (size + 3u) & ~3u;
   CodeMemBlock *block = nullptr;
   for (auto iter = code_arenas.begin(); iter != code_arenas.end(); iter++) {
     auto arena = static_cast<CodeMemoryArena *>(*iter);
-    block = arena->allocMemBlock(size);
+    block = arena->allocMemBlock(aligned_size);
     if (block)
       break;
   }
   if (!block) {
     // allocate new arena
-    auto arena_size = ALIGN_CEIL(size, OSMemory::PageSize());
+    auto arena_size = ALIGN_CEIL(aligned_size, OSMemory::PageSize());
     auto arena = allocateCodeMemoryArena(arena_size);
-    block = arena->allocMemBlock(size);
+    block = arena->allocMemBlock(aligned_size);
     CHECK_NOT_NULL(block);
   }
 
