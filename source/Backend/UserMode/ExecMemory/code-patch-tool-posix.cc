@@ -72,7 +72,21 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
 
   // patch buffer
   memcpy(original, address, buffer_size);
+#if defined(__aarch64__)
+  // A near trampoline is one aligned A64 instruction. Install it with a
+  // single store, rather than letting a generic memcpy expose torn bytes to
+  // an executing thread. This does NOT make multi-instruction patches atomic.
+  const bool atomic_instruction = buffer_size == sizeof(uint32_t) && ((uintptr_t)address & 3u) == 0;
+  if (atomic_instruction) {
+    uint32_t word = 0;
+    memcpy(&word, buffer, sizeof(word));
+    __atomic_store_n(static_cast<uint32_t *>(address), word, __ATOMIC_RELEASE);
+  } else {
+    memcpy(address, buffer, buffer_size);
+  }
+#else
   memcpy(address, buffer, buffer_size);
+#endif
 
   // restore page permission
   bool restore_failed = false;
@@ -88,7 +102,17 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size)
       writable &= mprotect((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
     if (writable) {
+#if defined(__aarch64__)
+      if (atomic_instruction) {
+        uint32_t word = 0;
+        memcpy(&word, original, sizeof(word));
+        __atomic_store_n(static_cast<uint32_t *>(address), word, __ATOMIC_RELEASE);
+      } else {
+        memcpy(address, original, buffer_size);
+      }
+#else
       memcpy(address, original, buffer_size);
+#endif
       ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
     } else {
       ERROR_LOG("could not roll back patch after RX restoration failure");
