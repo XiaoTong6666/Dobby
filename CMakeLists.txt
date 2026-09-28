@@ -274,6 +274,7 @@ if (PROCESSOR.AARCH64 OR NearBranch)
 endif ()
 
 if (NearBranch)
+  add_definitions(-DDOBBY_HAS_NEAR_BRANCH_TRAMPOLINE=1)
   message(STATUS "[Dobby] Enable near branch trampoline")
   set(dobby.SOURCE_FILE_LIST ${dobby.SOURCE_FILE_LIST}
     source/InterceptRouting/RoutingPlugin/NearBranchTrampoline/near_trampoline_arm64.cc

@@ -263,6 +263,8 @@ int main(int argc, char **argv) {
   }
   if (argc > 1 && strcmp(argv[1], "near") == 0) {
     dobby_enable_near_branch_trampoline();
+  } else if (argc > 1 && strcmp(argv[1], "required") == 0) {
+    dobby_require_near_branch_trampoline(true);
   }
   bool a = roundtrip("x17-live", review_x17, replacement_x17, 3, (4 ^ 0x1234));
   bool b = roundtrip("literal-load", review_literal, replacement_literal, 0, 0x1122334455667788LL);

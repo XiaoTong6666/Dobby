@@ -3,8 +3,25 @@
 #include "InterceptRouting/InterceptRouting.h"
 #include "InterceptRouting/RoutingPlugin/RoutingPlugin.h"
 #include "InterceptRouting/RoutingPlugin/NearBranchTrampoline/NearBranchTrampoline.h"
+#include "Interceptor.h"
 
 using namespace zz;
+
+static bool g_near_trampoline_required = false;
+
+bool NearBranchTrampolineRequired() {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  return g_near_trampoline_required;
+}
+
+PUBLIC void dobby_require_near_branch_trampoline(bool required) {
+  std::lock_guard<std::recursive_mutex> guard(Interceptor::MutationMutex());
+  g_near_trampoline_required = required;
+#if defined(DOBBY_HAS_NEAR_BRANCH_TRAMPOLINE)
+  if (required)
+    dobby_enable_near_branch_trampoline();
+#endif
+}
 
 void log_hex_format(uint8_t *buffer, uint32_t buffer_size) {
   char output[1024] = {0};

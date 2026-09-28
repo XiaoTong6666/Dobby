@@ -21,7 +21,9 @@ static AssemblyCode *GenerateFastForwardTrampoline(addr_t src, addr_t dst) {
 #define _ turbo_assembler_.
 
   // [adrp + add + br branch]
-  auto tramp_size = 3 *4;
+  // Reserve the maximum sequence once. A far target needs MOV+BR (20 bytes),
+  // and allocating a smaller ADRP candidate first leaks its arena slot.
+  auto tramp_size = 5 * 4;
   auto tramp_mem = NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(tramp_size, src, ARM64_B_XXX_RANGE);
   if (tramp_mem == nullptr) {
     ERROR_LOG("search near code block failed");
@@ -42,13 +44,6 @@ static AssemblyCode *GenerateFastForwardTrampoline(addr_t src, addr_t dst) {
     _ br(TMP_REG_0);
     DLOG(0, "forward trampoline use  [mov, br]");
 
-    auto tramp_size = turbo_assembler_.GetCodeBuffer()->GetBufferSize();
-    tramp_mem =
-        NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(tramp_size, src, ARM64_B_XXX_RANGE);
-    if (tramp_mem == nullptr) {
-      ERROR_LOG("Can't found near code chunk");
-      return nullptr;
-    }
   }
 
   turbo_assembler_.SetRealizedAddress((void *)tramp_mem);
