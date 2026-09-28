@@ -4,6 +4,10 @@
 #include "PlatformUtil/ProcessRuntimeUtility.h"
 #include <cstring>
 
+#if !defined(BUILDING_KERNEL) && (defined(__ANDROID__) || defined(__linux__))
+bool DobbyLastPatchFailureWasSynchronized();
+#endif
+
 // A failed code patch may have rolled back completely, or may have left an
 // unknown partial write if page protection changes were denied twice. Only
 // free its closure metadata after confirming that the entry bytes are intact.
@@ -11,6 +15,13 @@ inline bool DobbyOriginalBytesRestored(const InterceptEntry *entry) {
 #if defined(BUILDING_KERNEL)
   return false;
 #else
+#if defined(__ANDROID__) || defined(__linux__)
+  // A failed remote sync means the original bytes may be back in memory
+  // while another CPU still executes the replacement branch. Do not delete
+  // its target/closure metadata based on a local memcmp alone.
+  if (!DobbyLastPatchFailureWasSynchronized())
+    return false;
+#endif
   if (!entry->origin_insn_size || entry->origin_insn_size > sizeof(entry->origin_insns))
     return false;
   const addr_t start = entry->patched_addr;

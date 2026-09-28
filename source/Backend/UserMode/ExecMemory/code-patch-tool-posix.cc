@@ -9,10 +9,32 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
-#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
-#include <linux/membarrier.h>
+#if defined(__ANDROID__) || defined(__linux__)
 #include <sys/syscall.h>
+#if defined(__aarch64__)
+#include <linux/membarrier.h>
 #endif
+#endif
+
+static int ProtectPage(void *page, size_t size, int permission) {
+#if defined(__ANDROID__) || defined(__linux__)
+  // Calling libc mprotect() here self-intercepts if the user hooks that
+  // function. Always use the kernel entrypoint in this implementation.
+  return static_cast<int>(syscall(SYS_mprotect, static_cast<long>(reinterpret_cast<uintptr_t>(page)),
+                                  static_cast<long>(size), static_cast<long>(permission), 0L));
+#else
+  return mprotect(page, size, permission);
+#endif
+}
+
+// This is deliberately per-thread: DobbyHook serializes each installation,
+// and its failure handler reads the result immediately on the calling thread.
+// Comparing restored bytes alone cannot prove that other CPU pipelines have
+// stopped executing a previously installed branch.
+static thread_local bool g_last_patch_failure_synchronized = true;
+bool DobbyLastPatchFailureWasSynchronized() {
+  return g_last_patch_failure_synchronized;
+}
 
 // __clear_cache cleans/invalidates instruction and data caches, but its ISB
 // only synchronizes the calling core's pipeline. Linux's sync-core membarrier
@@ -23,9 +45,10 @@ static bool RegisterProcessInstructionSync() {
 #if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
   constexpr int required =
       MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
-  const long available = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+  const long available = syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_QUERY), 0L, 0L, 0L);
   return available >= 0 && (available & required) == required &&
-         syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0) == 0;
+         syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE), 0L, 0L, 0L) ==
+             0;
 #else
   return true;
 #endif
@@ -33,7 +56,7 @@ static bool RegisterProcessInstructionSync() {
 
 static bool SynchronizeProcessInstructionStreams() {
 #if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
-  return syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0) == 0;
+  return syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE), 0L, 0L, 0L) == 0;
 #else
   return true;
 #endif
@@ -69,6 +92,7 @@ static bool GetOriginalProtections(uintptr_t first, uintptr_t last, size_t page_
 #if !defined(__APPLE__)
 PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint32_t buffer_size) {
 #if defined(__ANDROID__) || defined(__linux__)
+  g_last_patch_failure_synchronized = true;
   if (address == nullptr || buffer == nullptr || buffer_size == 0) {
     return kMemoryOperationError;
   }
@@ -127,9 +151,12 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
   // Protect every page before copying. Only changing first and last pages
   // crashes for a patch spanning three or more pages.
   for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size) {
-    if (mprotect((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    if (ProtectPage((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+      bool protections_restored = true;
       for (uintptr_t previous = patch_page; previous < page; previous += page_size)
-        mprotect((void *)previous, page_size, original_protections[(previous - patch_page) / page_size]);
+        protections_restored &=
+            ProtectPage((void *)previous, page_size, original_protections[(previous - patch_page) / page_size]) == 0;
+      g_last_patch_failure_synchronized = protections_restored;
       release_scratch();
       return kMemoryOperationError;
     }
@@ -152,11 +179,15 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
 #else
   memcpy(address, buffer, buffer_size);
 #endif
+  // The new branch can now be visible. Keep the owner/closure metadata until
+  // either the new instructions are fully synchronized or a synchronized
+  // rollback has been completed.
+  g_last_patch_failure_synchronized = false;
 
   // restore page permission
   bool restore_failed = false;
   for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size) {
-    if (mprotect((void *)page, page_size, original_protections[(page - patch_page) / page_size]) != 0) {
+    if (ProtectPage((void *)page, page_size, original_protections[(page - patch_page) / page_size]) != 0) {
       restore_failed = true;
     }
   }
@@ -166,12 +197,15 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     // A completed cache flush is not by itself a synchronization point for
     // the execution pipelines of the other cores in the process.
     restore_failed = !SynchronizeProcessInstructionStreams();
+    if (!restore_failed)
+      g_last_patch_failure_synchronized = true;
   }
 
   if (restore_failed) {
     bool writable = true;
     for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size)
-      writable &= mprotect((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+      writable &= ProtectPage((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+    bool rollback_synchronized = false;
     if (writable) {
 #if defined(__aarch64__)
       if (atomic_instruction) {
@@ -187,13 +221,16 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
       ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
       // This cannot make a failed installation successful; it only helps
       // propagate the restored original instruction stream to other cores.
-      SynchronizeProcessInstructionStreams();
+      rollback_synchronized = SynchronizeProcessInstructionStreams();
     } else {
       // Avoid an allocator-backed logging call while a partially installed
       // hook of free()/malloc() might still be active.
     }
+    bool permissions_restored = true;
     for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size)
-      mprotect((void *)page, page_size, original_protections[(page - patch_page) / page_size]);
+      permissions_restored &=
+          ProtectPage((void *)page, page_size, original_protections[(page - patch_page) / page_size]) == 0;
+    g_last_patch_failure_synchronized = rollback_synchronized && permissions_restored;
   }
   release_scratch();
   return restore_failed ? kMemoryOperationError : kMemoryOperationSuccess;
