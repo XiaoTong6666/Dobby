@@ -9,13 +9,43 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include <vector>
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+#include <linux/membarrier.h>
+#include <sys/syscall.h>
+#endif
 
-static bool GetOriginalProtections(uintptr_t first, uintptr_t last, size_t page_size, std::vector<int> *protections) {
+// __clear_cache cleans/invalidates instruction and data caches, but its ISB
+// only synchronizes the calling core's pipeline. Linux's sync-core membarrier
+// executes a context-synchronizing operation on sibling threads as well.
+// Register before editing: if the kernel cannot provide this guarantee, do
+// not install a patch and claim that another CPU will observe it on return.
+static bool RegisterProcessInstructionSync() {
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+  constexpr int required =
+      MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+  const long available = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+  return available >= 0 && (available & required) == required &&
+         syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0) == 0;
+#else
+  return true;
+#endif
+}
+
+static bool SynchronizeProcessInstructionStreams() {
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+  return syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0) == 0;
+#else
+  return true;
+#endif
+}
+
+static bool GetOriginalProtections(uintptr_t first, uintptr_t last, size_t page_size, int *protections,
+                                   size_t page_count) {
   FILE *maps = fopen("/proc/self/maps", "r");
   if (!maps)
     return false;
-  protections->assign((last - first) / page_size + 1, -1);
+  for (size_t i = 0; i < page_count; ++i)
+    protections[i] = -1;
   char line[4096];
   while (fgets(line, sizeof(line), maps)) {
     uintptr_t start = 0, end = 0;
@@ -25,10 +55,11 @@ static bool GetOriginalProtections(uintptr_t first, uintptr_t last, size_t page_
     int prot = (permission[0] == 'r' ? PROT_READ : 0) | (permission[1] == 'w' ? PROT_WRITE : 0) |
                (permission[2] == 'x' ? PROT_EXEC : 0);
     for (uintptr_t page = first > start ? first : start; page < end && page <= last; page += page_size)
-      (*protections)[(page - first) / page_size] = prot;
+      protections[(page - first) / page_size] = prot;
   }
   fclose(maps);
-  for (int prot : *protections) {
+  for (size_t i = 0; i < page_count; ++i) {
+    const int prot = protections[i];
     if (prot < 0 || !(prot & PROT_READ))
       return false;
   }
@@ -50,14 +81,48 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
   }
   uintptr_t patch_page = ALIGN_FLOOR(address, page_size);
   uintptr_t patch_end_page = ALIGN_FLOOR((uintptr_t)address + buffer_size - 1, page_size);
-  std::vector<int> original_protections;
-  if (!GetOriginalProtections(patch_page, patch_end_page, page_size, &original_protections))
+  const size_t page_count = (patch_end_page - patch_page) / page_size + 1;
+  // Patching malloc/free themselves must not invoke free() after the target
+  // bytes are installed but before DobbyHook publishes the original entry.
+  // Keep common patch metadata on the stack, and use direct mmap/munmap for
+  // unusually large patches. std::vector and malloc-backed backups would
+  // invoke the newly installed hook in their destructors / free().
+  int inline_protections[64];
+  void *mapped_protections = nullptr;
+  const size_t protection_bytes = page_count * sizeof(int);
+  int *original_protections = inline_protections;
+  if (page_count > 64) {
+    mapped_protections = mmap(nullptr, protection_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped_protections == MAP_FAILED)
+      return kMemoryOperationError;
+    original_protections = static_cast<int *>(mapped_protections);
+  }
+  uint8_t inline_backup[256];
+  void *mapped_backup = nullptr;
+  uint8_t *original = inline_backup;
+  if (buffer_size > sizeof(inline_backup)) {
+    mapped_backup = mmap(nullptr, buffer_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped_backup == MAP_FAILED) {
+      if (mapped_protections)
+        munmap(mapped_protections, protection_bytes);
+      return kMemoryOperationError;
+    }
+    original = static_cast<uint8_t *>(mapped_backup);
+  }
+  auto release_scratch = [&]() {
+    if (mapped_backup)
+      munmap(mapped_backup, buffer_size);
+    if (mapped_protections)
+      munmap(mapped_protections, protection_bytes);
+  };
+  if (!GetOriginalProtections(patch_page, patch_end_page, page_size, original_protections, page_count)) {
+    release_scratch();
     return kMemoryOperationError;
-  // A failed RX restoration must not leave an unregistered inline hook in
-  // place. Keep the original bytes until the patch is fully committed.
-  auto *original = static_cast<uint8_t *>(malloc(buffer_size));
-  if (!original)
+  }
+  if (!RegisterProcessInstructionSync()) {
+    release_scratch();
     return kMemoryOperationError;
+  }
 
   // Protect every page before copying. Only changing first and last pages
   // crashes for a patch spanning three or more pages.
@@ -65,7 +130,7 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     if (mprotect((void *)page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
       for (uintptr_t previous = patch_page; previous < page; previous += page_size)
         mprotect((void *)previous, page_size, original_protections[(previous - patch_page) / page_size]);
-      free(original);
+      release_scratch();
       return kMemoryOperationError;
     }
   }
@@ -92,9 +157,15 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
   bool restore_failed = false;
   for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size) {
     if (mprotect((void *)page, page_size, original_protections[(page - patch_page) / page_size]) != 0) {
-      ERROR_LOG("failed to restore RX protection for patched page %p", page);
       restore_failed = true;
     }
+  }
+
+  if (!restore_failed) {
+    ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
+    // A completed cache flush is not by itself a synchronization point for
+    // the execution pipelines of the other cores in the process.
+    restore_failed = !SynchronizeProcessInstructionStreams();
   }
 
   if (restore_failed) {
@@ -114,15 +185,17 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
       memcpy(address, original, buffer_size);
 #endif
       ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
+      // This cannot make a failed installation successful; it only helps
+      // propagate the restored original instruction stream to other cores.
+      SynchronizeProcessInstructionStreams();
     } else {
-      ERROR_LOG("could not roll back patch after RX restoration failure");
+      // Avoid an allocator-backed logging call while a partially installed
+      // hook of free()/malloc() might still be active.
     }
     for (uintptr_t page = patch_page; page <= patch_end_page; page += page_size)
       mprotect((void *)page, page_size, original_protections[(page - patch_page) / page_size]);
-  } else {
-    ClearCache(address, static_cast<uint8_t *>(address) + buffer_size);
   }
-  free(original);
+  release_scratch();
   return restore_failed ? kMemoryOperationError : kMemoryOperationSuccess;
 #else
   return kMemoryOperationSuccess;
