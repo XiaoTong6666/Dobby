@@ -49,7 +49,11 @@ int main(int argc, char **argv) {
   const bool duplicate = strcmp(argv[1], "duplicate") == 0;
   const bool reinstall = strcmp(argv[1], "reinstall") == 0;
   const bool race = strcmp(argv[1], "race") == 0;
-  if (!roundtrip && !duplicate && !reinstall && !race && strcmp(argv[1], "destroy") != 0)
+  // Intentionally NOT in the passing CTest suite: concurrent execution of
+  // an x64 14-byte entry patch currently SIGSEGVs. Run this isolated child
+  // process manually to reproduce; a registry mutex cannot quiesce readers.
+  const bool execute_race = strcmp(argv[1], "execute-race-long") == 0;
+  if (!roundtrip && !duplicate && !reinstall && !race && !execute_race && strcmp(argv[1], "destroy") != 0)
     return 2;
 
   // Restoring a trampoline into an unmapped original must return failure;
@@ -101,7 +105,7 @@ int main(int argc, char **argv) {
     munmap(rw, page);
     return okay ? 0 : 1;
   }
-  if (race) {
+  if (race || execute_race) {
     if (DobbyDestroy(rw) != RT_SUCCESS)
       return 2;
     std::atomic<bool> go{false};
@@ -112,6 +116,14 @@ int main(int argc, char **argv) {
       workers.emplace_back([&] {
         while (!go.load(std::memory_order_acquire))
           std::this_thread::yield();
+        if (execute_race) {
+          while (go.load(std::memory_order_acquire)) {
+            const int value = reinterpret_cast<Fn>(rw)();
+            if (value != 7 && value != 99)
+              errors.fetch_add(1);
+          }
+          return;
+        }
         for (int i = 0; i < 120; ++i) {
           dobby_dummy_func_t prior = reinterpret_cast<dobby_dummy_func_t>(0x1);
           int rc = DobbyHook(rw, reinterpret_cast<dobby_dummy_func_t>(Replacement), &prior);
@@ -127,6 +139,18 @@ int main(int argc, char **argv) {
       });
     }
     go.store(true, std::memory_order_release);
+    if (execute_race) {
+      for (int i = 0; i < 150; ++i) {
+        dobby_dummy_func_t prior = nullptr;
+        if (DobbyHook(rw, reinterpret_cast<dobby_dummy_func_t>(Replacement), &prior) != RT_SUCCESS || !prior ||
+            reinterpret_cast<Fn>(prior)() != 7 || DobbyDestroy(rw) != RT_SUCCESS) {
+          errors.fetch_add(1);
+          break;
+        }
+        successes.fetch_add(1);
+      }
+      go.store(false, std::memory_order_release);
+    }
     for (auto &worker : workers)
       worker.join();
     const bool okay =

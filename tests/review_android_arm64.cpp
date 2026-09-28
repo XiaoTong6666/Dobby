@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <atomic>
+#include <thread>
+#include <vector>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <unistd.h>
 
 static bool is_rw_without_exec(void *address) {
@@ -51,7 +53,6 @@ static bool verify_rw_mapping_remains_rw() {
   return before && installed == RT_SUCCESS && during && relocated && destroyed == RT_SUCCESS && after;
 }
 #include <inttypes.h>
-#include <sys/mman.h>
 
 #if !defined(__aarch64__)
 #error This fixture must run on native ARM64
@@ -109,6 +110,56 @@ static long replacement_short(long) {
   return 123;
 }
 
+static int test_concurrent_execution() {
+  // This exercises an aligned single-instruction near patch while target
+  // threads continue running. It must not be used as proof that long patches
+  // or arbitrary instruction-cache synchronization are atomic.
+  dobby_require_near_branch_trampoline(true);
+  std::atomic<bool> go{false};
+  std::atomic<bool> done{false};
+  std::atomic<uint64_t> calls{0};
+  std::atomic<unsigned> unexpected{0};
+  std::vector<std::thread> readers;
+  for (int i = 0; i < 4; ++i) {
+    readers.emplace_back([&] {
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      while (!done.load(std::memory_order_acquire)) {
+        const long value = review_short(0);
+        if (value != 7 && value != 123)
+          unexpected.fetch_add(1, std::memory_order_relaxed);
+        calls.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+  go.store(true, std::memory_order_release);
+  unsigned installs = 0;
+  unsigned errors = 0;
+  for (int i = 0; i < 120; ++i) {
+    dobby_dummy_func_t original = nullptr;
+    const int result = DobbyHook(reinterpret_cast<void *>(review_short),
+                                 reinterpret_cast<dobby_dummy_func_t>(replacement_short), &original);
+    if (result != RT_SUCCESS || original == nullptr) {
+      ++errors;
+      break;
+    }
+    ++installs;
+    if (reinterpret_cast<long (*)(long)>(original)(0) != 7 ||
+        DobbyDestroy(reinterpret_cast<void *>(review_short)) != RT_SUCCESS) {
+      ++errors;
+      break;
+    }
+  }
+  done.store(true, std::memory_order_release);
+  for (auto &reader : readers)
+    reader.join();
+  dobby_disable_near_branch_trampoline();
+  const bool ok = errors == 0 && unexpected == 0 && installs == 120 && calls.load() > 0 && review_short(0) == 7;
+  printf("execute-race installs=%u calls=%llu unexpected=%u errors=%u result=%s\n", installs,
+         static_cast<unsigned long long>(calls.load()), unexpected.load(), errors, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 static void print_layout(const char *name, void *address) {
   FILE *maps = fopen("/proc/self/maps", "r");
   if (!maps)
@@ -152,7 +203,7 @@ static int permission_at(void *address) {
   return value;
 }
 
-static int check_reserved_neighbor_pages() {
+static int check_reserved_neighbor_pages(bool owner_released_slot) {
   // A guest code page inside a PROT_NONE reservation must not justify an
   // unsafe MAP_FIXED replacement of another address-space owner's pages.
   const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
@@ -169,11 +220,15 @@ static int check_reserved_neighbor_pages() {
   __builtin___clear_cache(reinterpret_cast<char *>(target), reinterpret_cast<char *>(target) + sizeof(body));
   if (mprotect(target, page, PROT_READ | PROT_EXEC) != 0)
     return 2;
+  // Only the reservation owner can release one page for Dobby to allocate.
+  // Do not use this technique against an actual native bridge reservation.
+  if (owner_released_slot && munmap(target - page, page) != 0)
+    return 2;
   dobby_require_near_branch_trampoline(true);
   dobby_dummy_func_t original = nullptr;
   auto replacement = reinterpret_cast<dobby_dummy_func_t>(replacement_short);
   const int status = DobbyHook(target, replacement, &original);
-  bool ok = permission_at(target - page) == 0 && permission_at(target + page) == 0 &&
+  bool ok = permission_at(target - 2 * page) == 0 && permission_at(target + page) == 0 &&
             memcmp(target + 4, reinterpret_cast<const uint8_t *>(body) + 4, 12) == 0;
   if (status == RT_SUCCESS) {
     uint32_t first = 0;
@@ -183,13 +238,14 @@ static int check_reserved_neighbor_pages() {
     ok = ok && original != nullptr && (first & 0x7c000000u) == 0x14000000u && call(0) == 123 && orig(0) == 7 &&
          DobbyDestroy(target) == RT_SUCCESS;
   } else {
-    ok = ok && original == nullptr;
+    ok = ok && original == nullptr && !owner_released_slot;
   }
-  ok = ok && memcmp(target, body, sizeof(body)) == 0 && permission_at(target - page) == 0 &&
+  ok = ok && memcmp(target, body, sizeof(body)) == 0 && permission_at(target - 2 * page) == 0 &&
        permission_at(target + page) == 0;
   dobby_disable_near_branch_trampoline();
-  printf("reservation near status=%d guard_previous=%d guard_next=%d result=%s\n", status, permission_at(target - page),
-         permission_at(target + page), ok ? "PASS" : "FAIL");
+  printf("reservation near owner_released_slot=%d status=%d guard_previous=%d guard_next=%d result=%s\n",
+         owner_released_slot, status, permission_at(target - 2 * page), permission_at(target + page),
+         ok ? "PASS" : "FAIL");
   munmap(reservation, length);
   return ok ? 0 : 1;
 }
@@ -224,8 +280,12 @@ template <typename T> static bool roundtrip(const char *name, T target, T replac
 
 int main(int argc, char **argv) {
   setbuf(stdout, nullptr);
+  if (argc > 1 && strcmp(argv[1], "execute-race") == 0)
+    return test_concurrent_execution();
   if (argc > 1 && strcmp(argv[1], "reservation") == 0)
-    return check_reserved_neighbor_pages();
+    return check_reserved_neighbor_pages(false);
+  if (argc > 1 && strcmp(argv[1], "reservation-owned-gap") == 0)
+    return check_reserved_neighbor_pages(true);
   if (argc > 1 && strcmp(argv[1], "maps") == 0) {
     print_layout("x17", reinterpret_cast<void *>(review_x17));
     print_layout("literal", reinterpret_cast<void *>(review_literal));

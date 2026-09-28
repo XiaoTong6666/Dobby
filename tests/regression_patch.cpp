@@ -30,8 +30,20 @@ static int PagePermissions(void *address) {
 }
 
 static bool fail_rx_restore = false;
+static int fail_rx_count = 0;
+static void *fail_writable_page = nullptr;
 extern "C" int __real_mprotect(void *, size_t, int);
 extern "C" int __wrap_mprotect(void *addr, size_t length, int prot) {
+  if (addr == fail_writable_page && prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
+    fail_writable_page = nullptr;
+    errno = EACCES;
+    return -1;
+  }
+  if (fail_rx_count > 0 && prot == (PROT_READ | PROT_EXEC)) {
+    --fail_rx_count;
+    errno = EACCES;
+    return -1;
+  }
   if (fail_rx_restore && prot == (PROT_READ | PROT_EXEC)) {
     fail_rx_restore = false;
     errno = EACCES;
@@ -47,7 +59,9 @@ int main(int argc, char **argv) {
   const bool restore = strcmp(argv[1], "restore") == 0;
   const bool rw = strcmp(argv[1], "rw") == 0;
   const bool mixed = strcmp(argv[1], "mixed") == 0;
-  if (!three && !restore && !rw && !mixed && strcmp(argv[1], "two") != 0)
+  const bool prepare_fail = strcmp(argv[1], "prepare-fail") == 0;
+  const bool restore_both = strcmp(argv[1], "restore-both") == 0;
+  if (!three && !restore && !rw && !mixed && !prepare_fail && !restore_both && strcmp(argv[1], "two") != 0)
     return 2;
   uint8_t *mapped = static_cast<uint8_t *>(mmap(nullptr, page * 4, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -58,18 +72,24 @@ int main(int argc, char **argv) {
     return 2;
   if (mixed && mprotect(mapped + page, page, PROT_READ | PROT_WRITE) != 0)
     return 2;
-  const size_t size = three ? page + 16 : 16;
+  const size_t size = (three || prepare_fail) ? page + 16 : 16;
   std::vector<uint8_t> contents(size, 0xCC);
   if (restore) fail_rx_restore = true;
+  if (restore_both)
+    fail_rx_count = 2;
+  if (prepare_fail)
+    fail_writable_page = mapped + 2 * page;
   auto *target = mapped + page - 8;
   auto result = DobbyCodePatch(target, contents.data(), static_cast<uint32_t>(size));
-  if (restore) {
-    if (result == kMemoryOperationSuccess || memcmp(target, contents.data(), size) == 0) {
-      fprintf(stderr, "RX restoration failed but patch was accepted or left installed\n");
+  if (restore || restore_both || prepare_fail) {
+    bool unchanged = true;
+    for (size_t i = 0; i < size; ++i)
+      unchanged &= target[i] == 0x90;
+    if (result == kMemoryOperationSuccess || !unchanged) {
+      fprintf(stderr, "injected patch failure accepted or left changed bytes\n");
       return 1;
     }
-  } else if (result != kMemoryOperationSuccess ||
-             memcmp(target, contents.data(), size) != 0) {
+  } else if (result != kMemoryOperationSuccess || memcmp(target, contents.data(), size) != 0) {
     fprintf(stderr, "patch did not cover every page\n");
     return 1;
   }
@@ -81,6 +101,14 @@ int main(int argc, char **argv) {
                 PagePermissions(mapped + page) != (PROT_READ | PROT_WRITE))) {
     fprintf(stderr, "mixed page permissions were not retained\n");
     return 1;
+  }
+  if (prepare_fail || restore_both) {
+    for (size_t i = 0; i < 3; ++i) {
+      if (PagePermissions(mapped + i * page) != (PROT_READ | PROT_EXEC)) {
+        fprintf(stderr, "failed patch did not restore permission on page %zu\n", i);
+        return 1;
+      }
+    }
   }
   return 0;
 }
