@@ -178,10 +178,10 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
       __ Emit<int8_t>(0x06);
 
       // if ZF == 0, jump to original destination
-      x86_insn_encode_begin();
       __ Emit<int8_t>(0x0F); // JNZ rel32
       __ Emit<int8_t>(0x85);
-      emit_rel32_label(code_buffer, x86_insn_encode_start, curr_relo_ip, orig_dst_ip);
+      // 1-byte PUSHF + 2-byte DEC + 1-byte POPF + 2-byte JECXZ + 6-byte JNZ.
+      __ Emit32(static_cast<uint32_t>(orig_dst_ip - (curr_relo_ip + 12)));
 #else
       // preserve flags, decrement RCX, restore flags
       __ Emit<int8_t>(0x9C); // PUSHFQ
