@@ -188,6 +188,8 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
 }
 
 MemBlock *NearMemoryAllocator::allocateNearBlock(uint32_t size, addr_t pos, size_t search_range, bool executable) {
+  if (size == 0 || search_range < size || pos < search_range || pos > UINTPTR_MAX - search_range)
+    return nullptr;
   MemBlock *result = nullptr;
   result = allocateNearBlockFromDefaultAllocator(size, pos, search_range, executable);
   if (!result) {
@@ -211,10 +213,13 @@ uint8_t *NearMemoryAllocator::allocateNearExecMemory(uint32_t size, addr_t pos, 
 
 uint8_t *NearMemoryAllocator::allocateNearExecMemory(uint8_t *buffer, uint32_t buffer_size, addr_t pos,
                                                      size_t search_range) {
+  if (!buffer || !buffer_size)
+    return nullptr;
   auto mem = allocateNearExecMemory(buffer_size, pos, search_range);
+  if (!mem)
+    return nullptr;
   auto ret = DobbyCodePatch(mem, buffer, buffer_size);
-  CHECK_EQ(ret, kMemoryOperationSuccess);
-  return mem;
+  return ret == kMemoryOperationSuccess ? mem : nullptr;
 }
 
 uint8_t *NearMemoryAllocator::allocateNearDataMemory(uint32_t size, addr_t pos, size_t search_range) {

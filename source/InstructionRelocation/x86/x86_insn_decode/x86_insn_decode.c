@@ -4,6 +4,7 @@
 #include "x86_insn_decode.h"
 
 #include "logging/logging.h"
+#include <string.h>
 
 #define REX_W(byte) ((byte & 0b00001000) >> 3)
 #define REX_R(byte) ((byte & 0b00000100) >> 2)
@@ -448,7 +449,20 @@ static void x86_insn_decode_opcode(x86_insn_reader_t *rd, x86_insn_decode_t *ins
 
   // check sse group
   if (X86_INSN_FLAG_GET_GROUP(insn_spec.flags) > X86_INSN_SSE_GROUP_START) {
-    UNIMPLEMENTED();
+    const unsigned group = X86_INSN_FLAG_GET_GROUP(insn_spec.flags);
+    const unsigned slot = opcode & 7;
+    x86_insn_group8_t *variants = NULL;
+    if (insn->prefix & INSN_PREFIX_REPE)
+      variants = x86_insn_sse_groups_repz;
+    else if (insn->prefix & INSN_PREFIX_REPNE)
+      variants = x86_insn_sse_groups_repnz;
+    else if (insn->prefix & INSN_PREFIX_OPERAND_SIZE)
+      variants = x86_insn_sse_groups_operand_size;
+    if (variants != NULL) {
+      x86_insn_spec_t candidate = variants[group].insns[slot];
+      if (candidate.name != NULL && strcmp(candidate.name, "bad") != 0)
+        insn_spec = candidate;
+    }
   }
 
   if (X86_INSN_FLAG_GET_GROUP(insn_spec.flags) > X86_INSN_GROUP_START &&

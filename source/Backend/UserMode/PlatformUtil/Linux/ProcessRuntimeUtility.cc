@@ -24,12 +24,13 @@ const std::vector<MemRegion> &ProcessRuntimeUtility::GetProcessMemoryLayout() {
   if (fp == nullptr)
     return regions;
 
-  while (!feof(fp)) {
+  while (true) {
     char line_buffer[DOBBY_LINE_MAX + 1];
-    fgets(line_buffer, DOBBY_LINE_MAX, fp);
+    if (fgets(line_buffer, sizeof(line_buffer), fp) == nullptr)
+      break;
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == DOBBY_LINE_MAX && line_buffer[DOBBY_LINE_MAX] != '\n') {
+    if (strchr(line_buffer, '\n') == nullptr && !feof(fp)) {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -61,18 +62,16 @@ const std::vector<MemRegion> &ProcessRuntimeUtility::GetProcessMemoryLayout() {
                "%" PRIxPTR " %hhx:%hhx %ld %n",
                &region_start, &region_end, permissions, &region_offset, &dev_major, &dev_minor, &inode,
                &path_index) < 7) {
-      FATAL("/proc/self/maps parse failed!");
-      fclose(fp);
-      return regions;
+      continue;
     }
 
     MemoryPermission permission;
-    if (permissions[0] == 'r' && permissions[1] == 'w') {
+    if (permissions[0] == 'r' && permissions[1] == 'w' && permissions[2] == 'x') {
+      permission = MemoryPermission::kReadWriteExecute;
+    } else if (permissions[0] == 'r' && permissions[1] == 'w') {
       permission = MemoryPermission::kReadWrite;
     } else if (permissions[0] == 'r' && permissions[2] == 'x') {
       permission = MemoryPermission::kReadExecute;
-    } else if (permissions[0] == 'r' && permissions[1] == 'w' && permissions[2] == 'x') {
-      permission = MemoryPermission::kReadWriteExecute;
     } else {
       permission = MemoryPermission::kNoAccess;
     }
@@ -84,14 +83,17 @@ const std::vector<MemRegion> &ProcessRuntimeUtility::GetProcessMemoryLayout() {
     MemRegion region = MemRegion(region_start,region_end - region_start, permission);
     regions.push_back(region);
   }
-  std::qsort(&regions[0], regions.size(), sizeof(MemRegion),
-             +[](const void* a, const void* b) -> int {
-                 const auto *i = static_cast<const MemRegion *>(a);
-                 const auto *j = static_cast<const MemRegion *>(b);
-                 if ((addr_t)i->start < (addr_t)j->start) return -1;
-                 if ((addr_t)i->start > (addr_t)j->start) return 1;
-                 return 0;
-             });
+  if (regions.size() > 1)
+    std::qsort(
+        regions.data(), regions.size(), sizeof(MemRegion), +[](const void *a, const void *b) -> int {
+          const auto *i = static_cast<const MemRegion *>(a);
+          const auto *j = static_cast<const MemRegion *>(b);
+          if ((addr_t)i->start < (addr_t)j->start)
+            return -1;
+          if ((addr_t)i->start > (addr_t)j->start)
+            return 1;
+          return 0;
+        });
 
   fclose(fp);
   return regions;
@@ -110,12 +112,13 @@ static std::vector<RuntimeModule> &get_process_map_with_proc_maps() {
   if (fp == nullptr)
     return *modules;
 
-  while (!feof(fp)) {
+  while (true) {
     char line_buffer[DOBBY_LINE_MAX + 1];
-    fgets(line_buffer, DOBBY_LINE_MAX, fp);
+    if (fgets(line_buffer, sizeof(line_buffer), fp) == nullptr)
+      break;
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == DOBBY_LINE_MAX && line_buffer[DOBBY_LINE_MAX] != '\n') {
+    if (strchr(line_buffer, '\n') == nullptr && !feof(fp)) {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -147,9 +150,7 @@ static std::vector<RuntimeModule> &get_process_map_with_proc_maps() {
                "%" PRIxPTR " %hhx:%hhx %ld %n",
                &region_start, &region_end, permissions, &region_offset, &dev_major, &dev_minor, &inode,
                &path_index) < 7) {
-      FATAL("/proc/self/maps parse failed!");
-      fclose(fp);
-      return *modules;
+      continue;
     }
 
     // check header section permission
@@ -171,7 +172,8 @@ static std::vector<RuntimeModule> &get_process_map_with_proc_maps() {
     if (path_buffer[strlen(path_buffer) - 1] == '\n') {
       path_buffer[strlen(path_buffer) - 1] = 0;
     }
-    strncpy(module.path, path_buffer, sizeof(module.path));
+    strncpy(module.path, path_buffer, sizeof(module.path) - 1);
+    module.path[sizeof(module.path) - 1] = '\0';
     module.load_address = (void *)region_start;
     modules->push_back(module);
 
