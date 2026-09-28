@@ -375,6 +375,25 @@ if (BUILD_TEST AND (NOT BUILDING_KERNEL))
   add_subdirectory(tests)
 endif ()
 
+# Small host regressions do not require the optional Unicorn/Capstone packages.
+option(DOBBY_REGRESSION_TESTS "Build standalone correctness regressions" OFF)
+if (DOBBY_REGRESSION_TESTS AND SYSTEM.Linux AND NOT BUILDING_KERNEL)
+  enable_testing()
+  add_executable(dobby_regression_memory tests/regression_memory.cpp)
+  target_link_libraries(dobby_regression_memory PRIVATE dobby)
+  add_test(NAME regression_tinystl COMMAND dobby_regression_memory tinystl)
+  add_test(NAME regression_data_arena COMMAND dobby_regression_memory data)
+  add_executable(dobby_regression_lifecycle tests/regression_lifecycle.cpp)
+  target_link_libraries(dobby_regression_lifecycle PRIVATE dobby)
+  add_test(NAME regression_failed_hook_output COMMAND dobby_regression_lifecycle hook)
+  add_test(NAME regression_failed_destroy COMMAND dobby_regression_lifecycle destroy)
+  if (PROCESSOR.X86_64)
+    add_executable(dobby_regression_x64 tests/regression_x64.cpp)
+    target_link_libraries(dobby_regression_x64 PRIVATE dobby)
+    add_test(NAME regression_x64 COMMAND dobby_regression_x64)
+  endif ()
+endif ()
+
 # ---
 
 if (SYSTEM.Darwin AND (NOT BUILDING_KERNEL))
