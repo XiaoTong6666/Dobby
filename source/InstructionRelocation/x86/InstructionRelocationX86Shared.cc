@@ -24,8 +24,6 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
                              CodeBufferBase *code_buffer, x86_insn_decode_t &insn, int8_t mode) {
 #define __ code_buffer->
 
-  int relocated_insn_len = -1;
-
   x86_options_t conf = {0};
   conf.mode = mode;
 
@@ -83,6 +81,9 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
       auto rip_insn_seq = (addr_t)NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(
           insn.length + 6 + 8, orig_rip_ref_addr, jmp_near_range);
 
+      if (rip_insn_seq == 0)
+        return RT_FAILED;
+
       rip_insn_seq_addr = rip_insn_seq;
 
       auto rip_insn_seq_buffer = CodeBufferBase();
@@ -103,7 +104,9 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
       // jmp *(rip) => back to relo process
       codegen_x64_jmp_absolute_addr(&rip_insn_seq_buffer, curr_relo_ip);
 
-      DobbyCodePatch((void *)rip_insn_seq, rip_insn_seq_buffer.GetBuffer(), rip_insn_seq_buffer.GetBufferSize());
+      if (DobbyCodePatch((void *)rip_insn_seq, rip_insn_seq_buffer.GetBuffer(), rip_insn_seq_buffer.GetBufferSize()) !=
+          kMemoryOperationSuccess)
+        return RT_FAILED;
     }
 
     // jmp *(rip) => jmp to [rip insn seq]
@@ -226,7 +229,7 @@ int GenRelocateSingleX86Insn(addr_t curr_orig_ip, addr_t curr_relo_ip, uint8_t *
     DLOG(0, "insn -> relocated insn: %d -> %d", insn.length, relo_len);
   }
 #endif
-  return relocated_insn_len;
+  return RT_SUCCESS;
 }
 
 void GenRelocateCodeX86Shared(void *buffer, CodeMemBlock *origin, CodeMemBlock *relocated, bool branch) {
@@ -241,13 +244,15 @@ x86_try_again:
   }
 
   int ret = GenRelocateCodeFixed(buffer, origin, relocated, branch);
-  if (ret != RT_SUCCESS) {
+  if (ret == kRelocationBufferTooSmall) {
     const int step_size = 16;
     expected_relocated_mem_size += step_size;
     relocated->reset(0, 0);
 
     goto x86_try_again;
   }
+  if (ret != RT_SUCCESS)
+    relocated->reset(0, 0);
 }
 
 #endif

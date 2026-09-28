@@ -30,7 +30,10 @@ int GenRelocateCodeFixed(void *buffer, CodeMemBlock *origin, CodeMemBlock *reloc
   while ((buffer_cursor < ((uint8_t *)buffer + predefined_relocate_size))) {
     x86_insn_decode_t insn = {0};
     memset(&insn, 0, sizeof(insn));
-    GenRelocateSingleX86Insn(curr_orig_ip, curr_relo_ip, buffer_cursor, turbo_assembler_.GetCodeBuffer(), insn, 64);
+    if (GenRelocateSingleX86Insn(curr_orig_ip, curr_relo_ip, buffer_cursor, turbo_assembler_.GetCodeBuffer(), insn,
+                                 64) != RT_SUCCESS ||
+        insn.length == 0)
+      return RT_FAILED;
 
     // go next
     curr_orig_ip += insn.length;
@@ -54,7 +57,7 @@ int GenRelocateCodeFixed(void *buffer, CodeMemBlock *origin, CodeMemBlock *reloc
   int relo_len = turbo_assembler_.GetCodeBuffer()->GetBufferSize();
   if (relo_len > relocated->size) {
     DLOG(0, "pre-alloc code chunk not enough");
-    return RT_FAILED;
+    return kRelocationBufferTooSmall;
   }
 
   // generate executable code
