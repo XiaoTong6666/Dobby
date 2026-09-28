@@ -1,5 +1,6 @@
 #include "dobby_internal.h"
 #include "Interceptor.h"
+#include "InterceptRouting/QuiescenceGuard.h"
 
 __attribute__((constructor)) static void ctor() {
   DLOG(-1, "================================");
@@ -22,6 +23,9 @@ PUBLIC int DobbyDestroy(void *address) {
 #endif
   auto entry = Interceptor::SharedInstance()->find((addr_t)address);
   if (entry && (entry->state == InterceptEntryState::Active || entry->state == InterceptEntryState::Removing)) {
+    DobbyScopedQuiescence exclusive(entry);
+    if (!exclusive.Acquire())
+      return RT_FAILED;
     const auto prior_state = entry->state;
     entry->state = InterceptEntryState::Removing;
     uint8_t *buffer = entry->origin_insns;

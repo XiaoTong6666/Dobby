@@ -16,6 +16,9 @@ InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   this->thumb_mode = false;
   this->branch_policy = DOBBY_BRANCH_LEGACY;
   this->hook_flags = 0;
+  this->quiescence_user_data = nullptr;
+  this->quiescence_acquire = nullptr;
+  this->quiescence_release = nullptr;
 
 #if defined(TARGET_ARCH_ARM)
   if (address % 2) {

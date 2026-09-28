@@ -11,7 +11,7 @@
 #include <inttypes.h>
 #if defined(__ANDROID__) || defined(__linux__)
 #include <sys/syscall.h>
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__x86_64__)
 #include <linux/membarrier.h>
 #endif
 #endif
@@ -33,6 +33,12 @@ static int ProtectPage(void *page, size_t size, int permission) {
 // stopped executing a previously installed branch.
 static thread_local bool g_last_patch_failure_synchronized = true;
 static thread_local bool g_last_patch_ever_published = false;
+#if defined(__x86_64__) && (defined(__ANDROID__) || defined(__linux__))
+static thread_local bool g_exclusive_x64_sync_core = false;
+void DobbySetExclusiveInstructionSync(bool required) {
+  g_exclusive_x64_sync_core = required;
+}
+#endif
 bool DobbyLastPatchFailureWasSynchronized() {
   return g_last_patch_failure_synchronized;
 }
@@ -46,7 +52,7 @@ bool DobbyLastPatchWasPublished() {
 // Register before editing: if the kernel cannot provide this guarantee, do
 // not install a patch and claim that another CPU will observe it on return.
 static bool RegisterProcessInstructionSync() {
-#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+#if (defined(__aarch64__) || defined(__x86_64__)) && (defined(__ANDROID__) || defined(__linux__))
   constexpr int required =
       MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
   const long available = syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_QUERY), 0L, 0L, 0L);
@@ -63,10 +69,19 @@ bool DobbyEnsureInstructionSync() {
   return RegisterProcessInstructionSync();
 }
 #endif
+#if defined(__x86_64__) && (defined(__ANDROID__) || defined(__linux__))
+bool DobbyEnsureExclusiveInstructionSync() {
+  return RegisterProcessInstructionSync();
+}
+#endif
 
 static bool SynchronizeProcessInstructionStreams() {
 #if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
   return syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE), 0L, 0L, 0L) == 0;
+#elif defined(__x86_64__) && (defined(__ANDROID__) || defined(__linux__))
+  if (g_exclusive_x64_sync_core)
+    return syscall(SYS_membarrier, static_cast<long>(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE), 0L, 0L, 0L) == 0;
+  return true;
 #else
   return true;
 #endif
@@ -154,7 +169,11 @@ PUBLIC MemoryOperationError DobbyCodePatch(void *address, uint8_t *buffer, uint3
     release_scratch();
     return kMemoryOperationError;
   }
-  if (!DobbyEnsureInstructionSync()) {
+  if (!DobbyEnsureInstructionSync()
+#if defined(__x86_64__) && (defined(__ANDROID__) || defined(__linux__))
+      || (g_exclusive_x64_sync_core && !DobbyEnsureExclusiveInstructionSync())
+#endif
+  ) {
     release_scratch();
     return kInstructionSyncUnavailable;
   }

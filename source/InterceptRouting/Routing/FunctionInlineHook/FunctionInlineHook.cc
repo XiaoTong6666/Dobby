@@ -3,6 +3,7 @@
 #include "Interceptor.h"
 #include "InterceptRouting/Routing/FunctionInlineHook/FunctionInlineHookRouting.h"
 #include "InterceptRouting/HookFailure.h"
+#include "InterceptRouting/QuiescenceGuard.h"
 
 #include <memory>
 
@@ -59,6 +60,9 @@ bool CanCommitConcurrently(const InterceptEntry *entry) {
 #if defined(TARGET_ARCH_ARM64) && (defined(__ANDROID__) || defined(__linux__))
   return entry && entry->routing && entry->routing->GetTrampolineBuffer() &&
          entry->routing->GetTrampolineBuffer()->GetBufferSize() == sizeof(uint32_t) && (entry->patched_addr & 3u) == 0;
+#elif defined(TARGET_ARCH_X64) && (defined(__ANDROID__) || defined(__linux__))
+  return entry && entry->quiescence_acquire && entry->quiescence_release &&
+         entry->origin_insn_size && entry->origin_insn_size <= sizeof(entry->origin_insns);
 #else
   (void)entry;
   return false; // The x64 5-byte jump and other multi-byte patches are not atomic.
@@ -75,6 +79,20 @@ PUBLIC int DobbyPrepareHook(const DobbyHookOptions *options, DobbyHookResult *re
       options->reserved || options->branch_policy > DOBBY_BRANCH_FORCE_LONG ||
       (options->flags & ~DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE))
     return Fail(result, DOBBY_HOOK_INVALID_ARGUMENT);
+  if (options->struct_size > sizeof(DobbyHookOptions) &&
+      options->struct_size < sizeof(DobbyHookOptionsQuiescentV2))
+    return Fail(result, DOBBY_HOOK_INVALID_ARGUMENT);
+  const auto *exclusive = options->struct_size >= sizeof(DobbyHookOptionsQuiescentV2)
+                              ? reinterpret_cast<const DobbyHookOptionsQuiescentV2 *>(options) : nullptr;
+  if (exclusive) {
+#if defined(TARGET_ARCH_X64) && (defined(__ANDROID__) || defined(__linux__))
+    if (!(options->flags & DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE) ||
+        !exclusive->acquire || !exclusive->release)
+      return Fail(result, DOBBY_HOOK_INVALID_ARGUMENT);
+#else
+    return Fail(result, DOBBY_HOOK_INVALID_ARGUMENT);
+#endif
+  }
 
   void *address = options->target;
   dobby_dummy_func_t replacement = options->replacement;
@@ -97,6 +115,11 @@ PUBLIC int DobbyPrepareHook(const DobbyHookOptions *options, DobbyHookResult *re
   entry->transaction_id = g_next_transaction_id++;
   entry->branch_policy = options->branch_policy;
   entry->hook_flags = options->flags;
+  if (exclusive) {
+    entry->quiescence_user_data = exclusive->user_data;
+    entry->quiescence_acquire = exclusive->acquire;
+    entry->quiescence_release = exclusive->release;
+  }
   auto *routing = new FunctionInlineHookRouting(entry, replacement);
 
   // Reserve BEFORE relocation. Another thread's Prepare or legacy DobbyHook
@@ -146,6 +169,10 @@ PUBLIC int DobbyCommitHook(DobbyHookHandle handle, DobbyHookResult *result) {
 #else
   result->selected_branch = DOBBY_BRANCH_FORCE_LONG;
 #endif
+  DobbyScopedQuiescence exclusive(entry);
+  if (!exclusive.Acquire())
+    return Fail(result, exclusive.SyncUnavailable() ? DOBBY_HOOK_SYNC_UNAVAILABLE
+                                                   : DOBBY_HOOK_CONCURRENCY_UNSUPPORTED);
   // Prepare can outlive the caller's loader activity. Refuse to overwrite a
   // target whose original bytes were modified or unmapped in that interval.
   // The caller still owns a never-published handle and must Abort it.

@@ -190,6 +190,25 @@ typedef struct {
   void *target;
   dobby_dummy_func_t replacement;
 } DobbyHookOptions;
+
+// Opt-in, trusted-host protocol for x64 Linux/Android multi-byte patches.
+// acquire() MUST stop every thread that could execute the target (including
+// new thread creation), and verify that no saved PC lies in the entire
+// overwritten instruction range. It must not call Dobby or return until that
+// condition holds. release() restores execution. Dobby keeps the lease across
+// write, rollback and sync-core. This does NOT make an arbitrary process with
+// uncooperative threads safe; use the base options to fail closed there.
+// user_data and both callbacks MUST remain valid until successful Destroy or
+// explicit recovery has released the transaction. A failed Commit or Destroy
+// may retain that ownership; freeing the host before cleanup is invalid.
+typedef int (*DobbyQuiescenceAcquire)(void *user_data, void *target, uint32_t patch_size);
+typedef void (*DobbyQuiescenceRelease)(void *user_data);
+typedef struct {
+  DobbyHookOptions base; // base.struct_size = sizeof(DobbyHookOptionsQuiescentV2)
+  void *user_data;
+  DobbyQuiescenceAcquire acquire;
+  DobbyQuiescenceRelease release;
+} DobbyHookOptionsQuiescentV2;
 typedef struct {
   uint32_t struct_size;
   uint32_t status; // DobbyHookStatus

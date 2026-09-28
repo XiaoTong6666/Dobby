@@ -28,6 +28,30 @@ passing suite: on x64, concurrent execution during an unsynchronized long
 
 A registry mutex or successful build does not fix this.
 
+## x64 cooperative execution lease (Linux and Android)
+
+The opt-in `DobbyHookOptionsQuiescentV2` provides an exclusive, *host-proven*
+lease. The host's acquire callback must block all possible entrants and new
+threads, wait for in-flight calls to leave the overwritten instruction range,
+and verify no saved PC is inside it. Dobby holds the lease across Commit,
+rollback, cross-core sync and Destroy. The callback and user_data must outlive
+any retained physical Hook until successful recovery.
+
+The `regression_x64_exclusive_patch_lease` CTest uses a real reader/writer
+gate for all fixture entrants, 150 install/destroy cycles and failure
+injection after a physical patch was already published. It also verifies:
+an unmanaged safe-request is rejected without writes; acquire refusal
+preserves Prepared ownership; Destroy refusal retains the installed Handle;
+Recover obtains another lease before restoring the original bytes; all
+leases balance after cleanup.
+
+On an x86_64 Android emulator the equivalent opt-in test is built with
+`-DDOBBY_ANDROID_X64_QUIESCENCE_TEST=ON` and runs as
+`dobby_android_x64_quiescence_review`. This **does not** establish generic
+stop-the-world or safety for legacy `DobbyHook` in a process with unknown
+entrants. In particular, a running linker or MediaProvider FUSE daemon
+cannot claim a cooperative lease without owning all calling threads.
+
 ## Android ARM64
 
 Build the opt-in fixture and run each mode in a fresh process:
