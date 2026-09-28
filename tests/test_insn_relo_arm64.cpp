@@ -80,14 +80,25 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--out-of-range") == 0) {
     // No scratch-register fallback: both classes must fail closed if a
     // synthetic relocated PC cannot reach the original control/data target.
-    const unsigned char branch[] = {0x01, 0x00, 0x00, 0x14};
-    const unsigned char literal[] = {0x00, 0x00, 0x00, 0x58};
+    const unsigned char branch[] = {0x02, 0x00, 0x00, 0x14};
+    const unsigned char literal[] = {0x40, 0x00, 0x00, 0x58};
     for (auto code : {branch, literal}) {
       CodeMemBlock original(0x10000000, 4);
       CodeMemBlock relocated(0x30000000, 0x1000);
       GenRelocateCode(const_cast<unsigned char *>(code), &original, &relocated, false);
       assert(relocated.addr == 0 && relocated.size == 0);
     }
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "--inline-literal") == 0) {
+    const char code[] = "\x40\x00\x00\x58\xc0\x03\x5f\xd6"
+                        "\x88\x77\x66\x55\x44\x33\x22\x11";
+    check_insn_relo(const_cast<char *>(code), sizeof(code) - 1, false, UC_ARM64_REG_X0,
+                    ^(UniconEmulator *orig, UniconEmulator *relo) {
+                      assert(orig->readRegister(UC_ARM64_REG_X0) ==
+                             reinterpret_cast<void *>(UINT64_C(0x1122334455667788)));
+                      assert(orig->readRegister(UC_ARM64_REG_X0) == relo->readRegister(UC_ARM64_REG_X0));
+                    });
     return 0;
   }
 

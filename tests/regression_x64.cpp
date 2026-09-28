@@ -52,10 +52,14 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "loopnz") == 0) {
     // LOOPNZ -2 decrements RCX while preserving FLAGS and loops to its own PC.
     const uint8_t loopnz[] = {0xe0, 0xfe};
-    const uint8_t expected[] = {0x9c, 0x48, 0xff, 0xc9, 0x9d, 0xe3, 0x12, 0x75,
-                                0x02, 0xeb, 0x0e, 0xff, 0x25, 0, 0, 0, 0,
-                                0, 0, 0x10, 0, 0, 0, 0, 0};
+    const uint8_t expected[] = {0x48, 0x8d, 0x49, 0xff, 0xe3, 0x12, 0x75, 0x02, 0xeb, 0x0e, 0xff, 0x25,
+                                0,    0,    0,    0,    0,    0,    0x10, 0,    0,    0,    0,    0};
     return Check("LOOPNZ rel8", loopnz, sizeof(loopnz), expected, sizeof(expected)) ? 0 : 1;
+  }
+  if (argc == 2 && strcmp(argv[1], "jcxz") == 0) {
+    const uint8_t jecxz[] = {0x67, 0xe3, 0x02};
+    const uint8_t expected[] = {0x67, 0xe3, 0x02, 0xeb, 0x0e, 0xff, 0x25, 0, 0, 0, 0, 0x05, 0x00, 0x10, 0, 0, 0, 0, 0};
+    return Check("JECXZ address-size override", jecxz, sizeof(jecxz), expected, sizeof(expected)) ? 0 : 1;
   }
   if (argc != 1) return 2;
   // JZ/JNZ must retain the short Jcc opcode rather than the 0F 8x near-Jcc opcode.

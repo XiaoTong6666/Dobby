@@ -131,6 +131,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME unicorn_arm64_x17_matrix COMMAND test_insn_relo_arm64 --x17-matrix)
   add_test(NAME unicorn_arm64_intra_prologue COMMAND test_insn_relo_arm64 --intra-prologue)
   add_test(NAME unicorn_arm64_out_of_range COMMAND test_insn_relo_arm64 --out-of-range)
+  add_test(NAME unicorn_arm64_inline_literal COMMAND test_insn_relo_arm64 --inline-literal)
   add_test(NAME unicorn_arm32_thumb COMMAND test_insn_relo_arm)
   add_test(NAME unicorn_x64_rip COMMAND test_insn_relo_x64)
   add_test(NAME unicorn_x64_unreachable_rip COMMAND test_insn_relo_x64 --unreachable-rip)
@@ -138,8 +139,8 @@ endif ()
 
 # ---
 
-add_executable(test_native
-  test_native.cpp)
-
-target_link_libraries(test_native
-  dobby)
+if (Plugin.SymbolResolver)
+  add_executable(test_native
+    test_native.cpp)
+  target_link_libraries(test_native dobby)
+endif ()

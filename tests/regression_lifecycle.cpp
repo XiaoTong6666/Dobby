@@ -6,6 +6,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <atomic>
+#include <thread>
+#include <vector>
+#include "Interceptor.h"
 
 using Fn = int (*)();
 static int Replacement() { return 99; }
@@ -42,7 +46,11 @@ int main(int argc, char **argv) {
     return 0;
   }
   const bool roundtrip = strcmp(argv[1], "roundtrip") == 0;
-  if (!roundtrip && strcmp(argv[1], "destroy") != 0) return 2;
+  const bool duplicate = strcmp(argv[1], "duplicate") == 0;
+  const bool reinstall = strcmp(argv[1], "reinstall") == 0;
+  const bool race = strcmp(argv[1], "race") == 0;
+  if (!roundtrip && !duplicate && !reinstall && !race && strcmp(argv[1], "destroy") != 0)
+    return 2;
 
   // Restoring a trampoline into an unmapped original must return failure;
   // otherwise the interceptor registry will incorrectly forget an active hook.
@@ -66,6 +74,68 @@ int main(int argc, char **argv) {
     }
     munmap(rw, page);
     return 0;
+  }
+  if (duplicate || reinstall) {
+    dobby_dummy_func_t second = reinterpret_cast<dobby_dummy_func_t>(0x1);
+    const int duplicate_status = DobbyHook(rw, reinterpret_cast<dobby_dummy_func_t>(Replacement), &second);
+    if (duplicate_status == RT_SUCCESS || second != nullptr || reinterpret_cast<Fn>(rw)() != 99 ||
+        reinterpret_cast<Fn>(original)() != 7 || Interceptor::SharedInstance()->count() != 1) {
+      fprintf(stderr, "duplicate install mutated the installed hook or registry\n");
+      return 1;
+    }
+    if (DobbyDestroy(rw) != RT_SUCCESS || Interceptor::SharedInstance()->count() != 0)
+      return 1;
+    if (reinstall) {
+      if (reinterpret_cast<Fn>(original)() != 7) {
+        fprintf(stderr, "destroy invalidated a published original trampoline\n");
+        return 1;
+      }
+      second = nullptr;
+      if (DobbyHook(rw, reinterpret_cast<dobby_dummy_func_t>(Replacement), &second) != RT_SUCCESS ||
+          second == nullptr || reinterpret_cast<Fn>(second)() != 7 || DobbyDestroy(rw) != RT_SUCCESS) {
+        fprintf(stderr, "reinstall/roundtrip failed\n");
+        return 1;
+      }
+    }
+    const bool okay = reinterpret_cast<Fn>(rw)() == 7;
+    munmap(rw, page);
+    return okay ? 0 : 1;
+  }
+  if (race) {
+    if (DobbyDestroy(rw) != RT_SUCCESS)
+      return 2;
+    std::atomic<bool> go{false};
+    std::atomic<int> errors{0};
+    std::atomic<int> successes{0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 8; ++t) {
+      workers.emplace_back([&] {
+        while (!go.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        for (int i = 0; i < 120; ++i) {
+          dobby_dummy_func_t prior = reinterpret_cast<dobby_dummy_func_t>(0x1);
+          int rc = DobbyHook(rw, reinterpret_cast<dobby_dummy_func_t>(Replacement), &prior);
+          if (rc != RT_SUCCESS) {
+            if (prior != nullptr)
+              errors.fetch_add(1);
+            continue;
+          }
+          successes.fetch_add(1);
+          if (!prior || reinterpret_cast<Fn>(prior)() != 7 || DobbyDestroy(rw) != RT_SUCCESS)
+            errors.fetch_add(1);
+        }
+      });
+    }
+    go.store(true, std::memory_order_release);
+    for (auto &worker : workers)
+      worker.join();
+    const bool okay =
+        errors == 0 && successes > 0 && Interceptor::SharedInstance()->count() == 0 && reinterpret_cast<Fn>(rw)() == 7;
+    if (!okay)
+      fprintf(stderr, "race errors=%d successful=%d active=%d\n", errors.load(), successes.load(),
+              Interceptor::SharedInstance()->count());
+    munmap(rw, page);
+    return okay ? 0 : 1;
   }
   munmap(rw, page);
   const int destroyed = DobbyDestroy(rw);

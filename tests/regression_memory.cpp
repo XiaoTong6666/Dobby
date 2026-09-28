@@ -1,5 +1,6 @@
 #include "PlatformUnifiedInterface/MemoryAllocator.h"
 #include "MemoryAllocator/NearMemoryAllocator.h"
+#include "Backend/UserMode/UnifiedInterface/platform.h"
 #include "TINYSTL/buffer.h"
 
 #include <cstdio>
@@ -60,6 +61,36 @@ int main(int argc, char **argv) {
                                                                                       sizeof(payload), 0x1000, 0);
     if (allocation != nullptr) {
       fprintf(stderr, "an impossible near allocation unexpectedly succeeded\n");
+      return 1;
+    }
+    return 0;
+  }
+  if (strcmp(argv[1], "fixed-map") == 0) {
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    auto *occupied =
+        static_cast<uint8_t *>(mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (occupied == MAP_FAILED)
+      return 2;
+    memset(occupied, 0xA5, page);
+    void *attempt = OSMemory::Allocate(page, kNoAccess, occupied);
+    if (attempt != nullptr || occupied[page - 1] != 0xA5) {
+      fprintf(stderr, "a fixed near allocation replaced an existing mapping\n");
+      return 1;
+    }
+    munmap(occupied, page);
+    return 0;
+  }
+  if (strcmp(argv[1], "near-data-reuse") == 0) {
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    auto *allocator = MemoryAllocator::SharedAllocator();
+    auto *first = allocator->allocateDataMemoryArena(page);
+    auto *second = allocator->allocateDataMemoryArena(page);
+    if (!first || !second)
+      return 2;
+    auto *block =
+        NearMemoryAllocator::SharedAllocator()->allocateNearBlockFromDefaultAllocator(16, first->addr, page, false);
+    if (!block || block->addr < first->addr || block->addr + block->size > first->end) {
+      fprintf(stderr, "near data block came from the wrong arena\n");
       return 1;
     }
     return 0;
