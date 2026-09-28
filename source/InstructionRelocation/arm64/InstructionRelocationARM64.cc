@@ -191,6 +191,7 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
   auto relocated_buffer = turbo_assembler_.GetCodeBuffer();
   std::vector<DirectBranchFixup> direct_branches;
   std::vector<LiteralLoadFixup> literal_loads;
+  std::vector<addr_t> address_targets;
 
   while (ctx->buffer_cursor < ctx->buffer + ctx->buffer_size) {
     uint32_t orig_off = ctx->buffer_cursor - ctx->buffer;
@@ -255,6 +256,11 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 
       int64_t offset = decode_immhi_immlo_offset(inst);
       addr_t dst_vmaddr = relo_cur_src_vmaddr(ctx) + offset;
+      // ADR returns the address itself. If its target is overwritten by a
+      // long inline patch, copying the bytes into the relocation buffer does
+      // not preserve pointer identity. Refuse such a relocation instead of
+      // returning a pointer whose contents have changed.
+      address_targets.push_back(dst_vmaddr);
 
       int rd = decode_rd(inst);
 
@@ -376,12 +382,24 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
   // A non-branching relocation needs its own skip branch around the data.
   const addr_t source_begin = ctx->origin->addr;
   const addr_t source_end = source_begin + ctx->origin->size;
+  if (source_end < source_begin)
+    return -1;
+  for (addr_t target : address_targets) {
+    if (target >= source_begin && target < source_end) {
+      ERROR_LOG("[insn relocate] ADR target overlaps overwritten entry: %p in [%p,%p)", target, source_begin,
+                source_end);
+      return -1;
+    }
+  }
   uint32_t data_skip_offset = 0;
   bool appended_skip = false;
   for (auto &fixup : literal_loads) {
     const size_t width = literal_data_size(fixup.instruction);
-    if (fixup.target >= source_begin && fixup.target < source_end) {
-      if (width == 0 || width > 16 || fixup.target > UINTPTR_MAX - width) {
+    if (width && fixup.target > UINTPTR_MAX - width)
+      return -1;
+    if (width && fixup.target < source_end && fixup.target <= UINTPTR_MAX - width &&
+        fixup.target + width > source_begin) {
+      if (width > 16) {
         ERROR_LOG("[insn relocate] partial inline ARM64 literal: instruction=%08x target=%p size=%zu source=[%p,%p)",
                   fixup.instruction, fixup.target, width, source_begin, source_end);
         return -1;
@@ -390,7 +408,11 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
       // patch overwriting the first four bytes of an 8-byte literal). Copy
       // the *whole* datum before installing the patch, but only if the entire
       // source memory range is currently readable.
-      const addr_t host_literal = (addr_t)ctx->buffer + (fixup.target - source_begin);
+      // The original datum can begin *before* the hook entry and extend into
+      // the patch, so a one-sided target-in-entry test misses it. A source
+      // before ctx->buffer must be read from the actual original mapping.
+      const addr_t host_literal =
+          fixup.target >= source_begin ? (addr_t)ctx->buffer + (fixup.target - source_begin) : fixup.target;
       bool readable = false;
       for (const auto &region : ProcessRuntimeUtility::GetProcessMemoryLayout()) {
         if (region.start <= host_literal && host_literal < region.end && region.end - host_literal >= width &&
@@ -410,7 +432,7 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
         relocated_buffer->Emit8(0);
       fixup.data_offset = relocated_buffer->GetBufferSize();
       fixup.copied = true;
-      relocated_buffer->EmitBuffer(ctx->buffer + (fixup.target - source_begin), width);
+      relocated_buffer->EmitBuffer(reinterpret_cast<uint8_t *>(host_literal), width);
     }
   }
   if (appended_skip) {
