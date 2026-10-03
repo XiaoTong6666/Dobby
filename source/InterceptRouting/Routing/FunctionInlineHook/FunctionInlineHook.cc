@@ -251,8 +251,10 @@ PUBLIC int DobbyRecoverHook(DobbyHookHandle handle, DobbyHookResult *result) {
 
 PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func) {
   // Hold the same lock across both phases to preserve the legacy one-shot
-  // ordering. Unlike the new API it cannot publish a caller-owned backup
-  // before commit; self-reentrant callbacks must use Prepare/Commit.
+  // ordering. Preserve the historical Dobby contract that the callable
+  // original is visible to the caller before replacement code can become
+  // reachable. This matters for a replacement that re-enters immediately
+  // during the physical Commit path.
   std::lock_guard<std::recursive_mutex> mutation(Interceptor::MutationMutex());
   if (origin_func)
     *origin_func = nullptr;
@@ -261,9 +263,18 @@ PUBLIC int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy
   if (DobbyPrepareHook(&options, &result) != RS_SUCCESS)
     return RS_FAILED;
   const auto handle = result.handle;
-  if (DobbyCommitHook(handle, &result) != RS_SUCCESS)
-    return RS_FAILED;
   if (origin_func)
     *origin_func = result.original;
+  if (DobbyCommitHook(handle, &result) != RS_SUCCESS) {
+    // If Commit never left a replacement reachable (or completed a fully
+    // synchronized rollback), preserve the long-standing failure contract of
+    // a null output. RECOVERY_REQUIRED is different: replacement code may
+    // still execute, so withdrawing the already-published backup would make a
+    // legacy replacement unable to call the original while Dobby retains the
+    // target for explicit address-based recovery.
+    if (origin_func && result.status != DOBBY_HOOK_RECOVERY_REQUIRED)
+      *origin_func = nullptr;
+    return RS_FAILED;
+  }
   return RS_SUCCESS;
 }

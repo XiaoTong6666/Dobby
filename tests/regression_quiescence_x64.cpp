@@ -18,6 +18,7 @@ int Replacement() { return 99; }
 struct ExecutionHost {
   pthread_rwlock_t entry_gate = PTHREAD_RWLOCK_INITIALIZER;
   std::atomic<int> inside{0};
+  std::atomic<bool> writer_pending{false};
   std::atomic<int> pauses{0};
   std::atomic<int> resumes{0};
   std::atomic<bool> deny_next{false};
@@ -33,10 +34,18 @@ int StopAll(void *opaque, void *target, uint32_t span) {
     return 0;
   // The fixture guarantees every possible entrant owns entry_gate in read
   // mode and cannot spawn an unregistered entrant during the exclusive lease.
-  if (pthread_rwlock_wrlock(&host.entry_gate) != 0)
+  // Block admission before waiting for the writer lock. The default glibc
+  // rwlock may prefer readers, so an endless stream of reader acquisitions is
+  // otherwise allowed to starve this writer forever and make the regression
+  // depend on scheduler luck rather than Dobby's transaction semantics.
+  host.writer_pending.store(true, std::memory_order_release);
+  if (pthread_rwlock_wrlock(&host.entry_gate) != 0) {
+    host.writer_pending.store(false, std::memory_order_release);
     return 0;
+  }
   if (host.inside.load() != 0) {
     pthread_rwlock_unlock(&host.entry_gate);
+    host.writer_pending.store(false, std::memory_order_release);
     return 0;
   }
   ++host.pauses;
@@ -46,6 +55,7 @@ void ResumeAll(void *opaque) {
   auto &host = *static_cast<ExecutionHost *>(opaque);
   ++host.resumes;
   pthread_rwlock_unlock(&host.entry_gate);
+  host.writer_pending.store(false, std::memory_order_release);
 }
 bool Assert(bool condition, const char *message) {
   if (!condition)
@@ -95,6 +105,9 @@ int main() {
   for (int t = 0; t < 8; ++t) {
     workers.emplace_back([&] {
       while (running.load(std::memory_order_acquire)) {
+        while (host.writer_pending.load(std::memory_order_acquire) &&
+               running.load(std::memory_order_relaxed))
+          std::this_thread::yield();
         pthread_rwlock_rdlock(&host.entry_gate);
         ++host.inside;
         const int value = target();

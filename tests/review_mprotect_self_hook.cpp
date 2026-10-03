@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 using ProtectFn = int (*)(void*, size_t, int);
-static ProtectFn published_original = nullptr;
+static dobby_dummy_func_t published_original = nullptr;
 static std::atomic<unsigned> before_publication{0};
 
 extern "C" __attribute__((noinline)) int replacement_mprotect(void *addr, size_t len, int protection) {
@@ -15,16 +15,14 @@ extern "C" __attribute__((noinline)) int replacement_mprotect(void *addr, size_t
     errno = EACCES;
     return -1;
   }
-  return published_original(addr, len, protection);
+  return reinterpret_cast<ProtectFn>(published_original)(addr, len, protection);
 }
 
 int main() {
   setbuf(stdout, nullptr);
-  dobby_dummy_func_t trampoline = nullptr;
   const int installed = DobbyHook(reinterpret_cast<void *>(static_cast<ProtectFn>(&mprotect)),
-                                  reinterpret_cast<dobby_dummy_func_t>(replacement_mprotect), &trampoline);
+                                  reinterpret_cast<dobby_dummy_func_t>(replacement_mprotect), &published_original);
   const unsigned premature = before_publication.load();
-  if (installed == RT_SUCCESS) published_original = reinterpret_cast<ProtectFn>(trampoline);
   printf("self-mprotect-hook: status=%d premature=%u published=%p\n", installed, premature,
          reinterpret_cast<void*>(published_original));
   if (installed == RT_SUCCESS) {

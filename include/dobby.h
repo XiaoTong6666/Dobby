@@ -151,7 +151,17 @@ typedef void (*PostCallTy)(DobbyRegisterContext *ctx, const InterceptEntry *info
 int DobbyWrap(void *function_address, PreCallTy pre_call, PostCallTy post_call);
 #endif
 
-// function inline hook
+// Legacy one-shot function inline hook.
+//
+// If origin_func is supplied, Dobby publishes the callable original trampoline
+// before the physical entry patch can make replace_func reachable. On a normal
+// failure it resets *origin_func to null. The exceptional failure case is a
+// post-publication recovery failure: Dobby returns RS_FAILED but keeps
+// *origin_func callable and retains target ownership because replace_func may
+// still be reachable. Legacy callers that observe RS_FAILED with a non-null
+// origin must keep that trampoline alive and call DobbyDestroy(address) to
+// complete recovery before forgetting the target. New integrations should use
+// DobbyPrepareHook/DobbyCommitHook and inspect DOBBY_HOOK_RECOVERY_REQUIRED.
 int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func);
 
 // V1 transaction API. A handle is a monotonically assigned process-local ID,

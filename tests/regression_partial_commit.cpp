@@ -41,10 +41,11 @@ int main() {
   dobby_dummy_func_t trampoline = reinterpret_cast<dobby_dummy_func_t>(1);
   const int installed = DobbyHook(code, reinterpret_cast<dobby_dummy_func_t>(Replacement), &trampoline);
   auto *entry = Interceptor::SharedInstance()->find(reinterpret_cast<addr_t>(code));
-  if (installed == RT_SUCCESS || trampoline != nullptr || !entry ||
+  if (installed == RT_SUCCESS || trampoline == nullptr ||
+      reinterpret_cast<int (*)()>(trampoline)() != 7 || !entry ||
       entry->state != InterceptEntryState::Removing ||
       Interceptor::SharedInstance()->count() != 1) {
-    fprintf(stderr, "failed partial commit was published or its rollback metadata freed\n");
+    fprintf(stderr, "failed partial commit lost its published backup or rollback ownership\n");
     return 1;
   }
   dobby_dummy_func_t duplicate = reinterpret_cast<dobby_dummy_func_t>(1);

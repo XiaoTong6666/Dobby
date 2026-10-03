@@ -16,7 +16,10 @@ existing instruction emulator tests:
 
 The review_self_hook_free and review_self_hook_mprotect tests install Hooks
 on libc memory functions themselves. They assert that no invocation reaches
-the replacement before the original pointer is published.
+the replacement before the original pointer is published. Legacy DobbyHook
+now publishes that pointer before Commit; an ordinary failed install retracts
+it to null, while a RECOVERY_REQUIRED failure keeps it callable until
+address-based Destroy completes recovery.
 The regression_patch_large_scratch test exercises
 patch metadata spanning more than 64 memory pages.
 

@@ -82,8 +82,13 @@ int main(int argc, char **argv) {
                                           reinterpret_cast<dobby_dummy_func_t>(replacement), &duplicate);
   // A caller must explicitly retry restoration and its cross-core barrier
   // before the registry may drop the potentially in-flight branch metadata.
+  // Legacy DobbyHook publishes the callable original before Commit. If Commit
+  // reaches RECOVERY_REQUIRED, that backup must remain published because an
+  // already-entered replacement can still need it while ownership is retained.
+  const bool backup_callable =
+      original != nullptr && reinterpret_cast<long (*)(long)>(original)(0) == 7;
   const int recovered = entry ? DobbyDestroy(reinterpret_cast<void *>(review_sync_target)) : RT_FAILED;
-  const bool ok = status != RT_SUCCESS && failures.load() == 2 && original == nullptr &&
+  const bool ok = status != RT_SUCCESS && failures.load() == 2 && backup_callable &&
                   retained_removing && actual == 0xd28000e0u &&
                   duplicate_status != RT_SUCCESS && duplicate == nullptr &&
                   recovered == RT_SUCCESS &&
