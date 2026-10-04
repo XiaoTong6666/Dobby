@@ -31,6 +31,9 @@ for mode in default near required adr-data adr-data-near adr-data-required \
             literal-left-overlap literal-left-overlap-near literal-left-overlap-required \
             rollback-default rollback-near rollback-required \
             transaction transaction-rollback \
+            strict-prepatched strict-prepatched-late strict-target-changed-late \
+            strict-backup-cycle strict-bti strict-pac-landing strict-bti-ownership strict-bti-foreign-destroy \
+            strict-resume-cycle strict-resume-conditional strict-resume-pauth \
             short reservation reservation-owned-gap cross-core execute-race; do
   if ! output=$(adb -s "$serial" shell "$remote" "$mode" 2>&1); then
     printf 'FAILED %s\n%s\n' "$mode" "$output" >&2

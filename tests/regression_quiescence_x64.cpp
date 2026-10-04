@@ -87,8 +87,16 @@ int main() {
   const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   void *code = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (code == MAP_FAILED) return 2;
-  const uint8_t original[] = {0xb8, 7, 0, 0, 0, 0xc3, 0x90, 0x90, 0x90, 0x90,
-                              0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+  // Keep the fixture on well-covered legacy x86 encodings while forcing the
+  // stolen span to cross the long trampoline boundary: 5 + 3 + 3 + 5 = 16
+  // bytes before RET.  The arithmetic immediates are zero, so the function
+  // still returns 7.
+  const uint8_t original[] = {0xb8, 0x07, 0x00, 0x00, 0x00,       // mov eax,7
+                              0x83, 0xc0, 0x00,                   // add eax,0
+                              0x83, 0xe8, 0x00,                   // sub eax,0
+                              0xb9, 0x00, 0x00, 0x00, 0x00,       // mov ecx,0
+                              0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                              0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
   memcpy(code, original, sizeof(original));
   auto target = reinterpret_cast<Target>(code);
   ExecutionHost host;
@@ -198,6 +206,48 @@ int main() {
   running = false;
   for (auto &worker : workers)
     worker.join();
+
+  // A foreign writer can modify bytes in the stolen-prologue tail that lie
+  // beyond Dobby's physical trampoline. Destroy must reject rather than
+  // restoring origin_insn_size bytes over that foreign modification.
+  if (okay) {
+    result = Result();
+    okay &= Assert(DobbyPrepareHook(exclusive, &result) == RS_SUCCESS && result.handle != 0,
+                   "prepare foreign-tail ownership fixture");
+    const auto ticket = result.handle;
+    const auto patch_size = result.patch_size;
+    auto *entry = Interceptor::SharedInstance()->find(reinterpret_cast<addr_t>(code));
+    okay &= Assert(entry != nullptr && entry->origin_insn_size > patch_size,
+                   "x64 stolen span exceeds trampoline span");
+    if (okay) {
+      result = Result();
+      okay &= Assert(DobbyCommitHook(ticket, &result) == RS_SUCCESS && target() == 99,
+                     "commit foreign-tail ownership fixture");
+    }
+    if (okay) {
+      auto *bytes = static_cast<uint8_t *>(code);
+      const uint8_t expected_tail = original[patch_size];
+      const uint8_t foreign_tail = static_cast<uint8_t>(expected_tail ^ 0x5a);
+      bytes[patch_size] = foreign_tail;
+      __builtin___clear_cache(reinterpret_cast<char *>(bytes + patch_size),
+                              reinterpret_cast<char *>(bytes + patch_size + 1));
+
+      auto rejected = Result();
+      okay &= Assert(DobbyDestroyHook(ticket, &rejected) == RS_FAILED &&
+                         rejected.status == DOBBY_HOOK_TARGET_CHANGED && rejected.handle == ticket &&
+                         bytes[patch_size] == foreign_tail && target() == 99,
+                     "destroy rejects foreign change in stolen-prologue tail");
+
+      bytes[patch_size] = expected_tail;
+      __builtin___clear_cache(reinterpret_cast<char *>(bytes + patch_size),
+                              reinterpret_cast<char *>(bytes + patch_size + 1));
+      auto removed = Result();
+      okay &= Assert(DobbyDestroyHook(ticket, &removed) == RS_SUCCESS && target() == 7 &&
+                         memcmp(code, original, sizeof(original)) == 0,
+                     "destroy succeeds after tail ownership is restored");
+    }
+  }
+
   okay &= Assert(errors.load() == 0 && host.inside.load() == 0 &&
                     host.pauses.load() == host.resumes.load() &&
                     host.pauses.load() >= 2 &&

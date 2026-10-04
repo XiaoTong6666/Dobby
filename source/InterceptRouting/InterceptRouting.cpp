@@ -62,6 +62,7 @@ bool InterceptRouting::GenerateRelocatedCode() {
 
   // set the relocated instruction address
   entry_->relocated_addr = relocated_->addr;
+  entry_->relocated_size = relocated_->size;
 
   // save original prologue
   memcpy((void *)entry_->origin_insns, (void *)origin_->addr, origin_->size);

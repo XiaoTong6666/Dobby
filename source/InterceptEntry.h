@@ -19,6 +19,10 @@ typedef struct InterceptEntry {
     addr_t addr;
     addr_t patched_addr;
   };
+  // Public/semantic hook address. Usually equal to patched_addr, but strict
+  // ARM64 hooks may preserve a BTI landing pad and patch target+4 instead.
+  addr_t logical_target;
+  uint32_t landing_pad_size;
   uint32_t patched_size;
 
   addr_t relocated_addr;

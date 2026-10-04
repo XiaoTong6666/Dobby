@@ -8,6 +8,8 @@ InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   this->type = type;
   this->routing = nullptr;
   this->state = InterceptEntryState::Installing;
+  this->logical_target = 0;
+  this->landing_pad_size = 0;
   this->patched_size = 0;
   this->relocated_addr = 0;
   this->relocated_size = 0;
@@ -29,6 +31,7 @@ InterceptEntry::InterceptEntry(InterceptEntryType type, addr_t address) {
   }
 #endif
 
+  this->logical_target = address;
   this->patched_addr = address;
   this->id = Interceptor::SharedInstance()->count();
 }

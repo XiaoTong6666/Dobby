@@ -189,9 +189,26 @@ typedef enum {
   DOBBY_HOOK_RECOVERY_REQUIRED,
   DOBBY_HOOK_INVALID_HANDLE,
   DOBBY_HOOK_INVALID_STATE,
-  DOBBY_HOOK_TARGET_CHANGED
+  DOBBY_HOOK_TARGET_CHANGED,
+  DOBBY_HOOK_TARGET_UNVERIFIABLE,
+  DOBBY_HOOK_TARGET_PREPATCHED,
+  DOBBY_HOOK_BACKUP_INVALID,
+  DOBBY_HOOK_TARGET_UNSUPPORTED
 } DobbyHookStatus;
-enum { DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE = 1u };
+enum {
+  DOBBY_HOOK_REQUIRE_CONCURRENT_SAFE = 1u,
+  // Fail closed unless the executable target still matches the bytes in its
+  // file-backed mapping. This rejects foreign inline patches before Dobby
+  // relocates or overwrites them. Anonymous/JIT targets are unverifiable.
+  DOBBY_HOOK_REQUIRE_PRISTINE_ENTRY = 1u << 1,
+  // Validate the generated callable original before publication. ARM64
+  // rejects direct cycles into the patched entry/replacement.
+  DOBBY_HOOK_VALIDATE_BACKUP = 1u << 2,
+  // Preserve an architectural indirect-branch landing pad at the logical
+  // function entry. On ARM64 a leading BTI instruction remains in place and
+  // the physical inline patch starts at target+4.
+  DOBBY_HOOK_PRESERVE_LANDING_PAD = 1u << 3,
+};
 typedef struct {
   uint32_t struct_size;
   uint32_t branch_policy;

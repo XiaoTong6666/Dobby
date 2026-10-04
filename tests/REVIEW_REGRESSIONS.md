@@ -71,6 +71,64 @@ Build the opt-in fixture and run each mode in a fresh process:
 Run the script separately for native AArch64 and for a translated ARM64 guest
 on an x86_64 emulator. The script displays ABI and native-bridge properties.
 
+The strict transaction cases additionally verify the fail-closed contract used
+by high-risk system hooks such as Android loader entrypoints:
+
+- `strict-prepatched` modifies a file-backed entry before Prepare and requires
+  `DOBBY_HOOK_TARGET_PREPATCHED` without a ticket or physical write.
+- `strict-prepatched-late` leaves the first instruction pristine but changes
+  the second instruction, proving strict mode fingerprints beyond the 4-byte
+  near-patch width instead of trusting only the entry word.
+- `strict-target-changed-late` mutates only the second instruction after a
+  successful Prepare and requires Commit to return `DOBBY_HOOK_TARGET_CHANGED`
+  without publishing the replacement.
+- `strict-backup-cycle` feeds a self-branching original into backup generation
+  and requires `DOBBY_HOOK_BACKUP_INVALID` before publication.
+- `strict-resume-cycle` uses a normal first instruction whose resume address
+  immediately branches back into the patched entry. This models the dangerous
+  `replacement -> original -> resume -> patched entry` recursion class and must
+  also fail as `DOBBY_HOOK_BACKUP_INVALID`.
+- `strict-bti` verifies the landing-pad-aware patch-site model: a leading BTI
+  remains untouched, the physical near branch is installed at `target+4`, the
+  returned original executes the instruction after BTI, and Destroy restores
+  the physical patch site without modifying the landing pad.
+- `strict-bti-ownership` verifies that one prepared BTI hook reserves both the
+  logical entry and its `target+4` physical patch site, so a second caller
+  cannot bypass ownership by addressing either side of the split target.
+- `strict-bti-foreign-destroy` replaces Dobby's active `target+4` branch with
+  a foreign instruction and requires Destroy to return `TARGET_CHANGED`
+  without restoring over the foreign writer; after the Dobby branch is put
+  back, Destroy must succeed normally.
+- `strict-pac-landing` presents `PACIASP` and `PACIBSP` at the logical entry.
+  They are valid BTI-C landing pads but also mutate LR, so Dobby must return
+  `DOBBY_HOOK_TARGET_UNSUPPORTED` instead of treating them like marker-only
+  BTI and blindly moving the physical patch to `target+4`.
+- `strict-resume-conditional` covers `CBZ`, `B.cond`, and `TBZ` resume paths
+  whose taken edge jumps back into the patched entry. The verifier must walk
+  both taken and fall-through edges and reject each cycle as
+  `DOBBY_HOOK_BACKUP_INVALID`.
+- `strict-resume-pauth` covers `RETAA`, `RETAB`, `ERETAA`, and `ERETAB` at the
+  resume frontier. Authenticated or privileged control flow cannot be proven
+  safe by the bounded static verifier and must fail closed as
+  `DOBBY_HOOK_TARGET_UNSUPPORTED`.
+
+`DOBBY_HOOK_REQUIRE_PRISTINE_ENTRY` intentionally requires a verifiable
+file-backed executable mapping. Anonymous/JIT code is not "assumed pristine";
+generic hook adapters should request this flag only when they know their target
+comes from a stable ELF image. `DOBBY_HOOK_VALIDATE_BACKUP` is independent and
+can still protect anonymous/JIT targets from a provable backup control-flow
+cycle.
+
+Android's 16 KiB app-compat linker path is an intentional strict-mode
+limitation. When bionic has to copy an incompatible ELF `PT_LOAD` into an
+anonymous compatibility mapping instead of directly mmapping the backing
+file, `/proc/self/maps` no longer provides a normal file-backed mapping that
+`DOBBY_HOOK_REQUIRE_PRISTINE_ENTRY` can authenticate. Such a target therefore
+returns `DOBBY_HOOK_TARGET_UNVERIFIABLE`; do not whitelist the anonymous VMA
+without a separate loader-aware proof tying it back to the original ELF
+file/offset. Callers such as loader observers should fall back without an
+inline patch.
+
 adr-data must reject a default long Hook when preserving the returned
 address would expose overwritten literal data. Both near modes must preserve
 address identity and contents. literal-left-overlap checks an eight-byte

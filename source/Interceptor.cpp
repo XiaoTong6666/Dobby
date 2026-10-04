@@ -13,7 +13,7 @@ std::recursive_mutex &Interceptor::MutationMutex() {
 InterceptEntry *Interceptor::find(addr_t addr) {
   std::lock_guard<std::recursive_mutex> guard(MutationMutex());
   for (auto *entry : entries) {
-    if (entry->patched_addr == addr) {
+    if (entry->patched_addr == addr || entry->logical_target == addr) {
       return entry;
     }
   }
@@ -28,7 +28,7 @@ void Interceptor::add(InterceptEntry *entry) {
 InterceptEntry *Interceptor::remove(addr_t addr) {
   std::lock_guard<std::recursive_mutex> guard(MutationMutex());
   for (auto iter = entries.begin(); iter != entries.end(); iter++) {
-    if ((*iter)->patched_addr == addr) {
+    if ((*iter)->patched_addr == addr || (*iter)->logical_target == addr) {
       auto *entry = *iter;
       entries.erase(iter);
       return entry;

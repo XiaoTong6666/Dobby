@@ -17,6 +17,7 @@ _deps
 
 ## Build generated
 build/
+/build-*review*/
 DerivedData/
 
 ## Various settings
