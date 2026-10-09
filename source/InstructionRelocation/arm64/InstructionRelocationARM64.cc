@@ -21,6 +21,28 @@ using namespace zz::arm64;
 namespace {
 
 constexpr int64_t kArm64DirectBranchRange = INT64_C(1) << 27;
+constexpr size_t kArm64LiteralRange = size_t{1} << 20;
+
+// Constrain the *base* of the relocated buffer so an instruction at
+// `instruction_offset` can still encode a PC-relative reference to `target`.
+// ARM64 B/BL and literal loads use signed immediates whose positive endpoint
+// is exclusive, so keep one instruction of margin at both ends. The slightly
+// conservative symmetric window is easier for NearMemoryAllocator to honor
+// and avoids selecting an address that only works at the negative endpoint.
+bool IntersectPcRelativeWindow(addr_t target, uint32_t instruction_offset, size_t reach,
+                               addr_t *minimum, addr_t *maximum) {
+  if (!minimum || !maximum || reach <= sizeof(arm64_inst_t) || target < instruction_offset)
+    return false;
+  const addr_t center = target - instruction_offset;
+  const addr_t radius = static_cast<addr_t>(reach - sizeof(arm64_inst_t));
+  const addr_t local_minimum = center > radius ? center - radius : 0;
+  const addr_t local_maximum = center <= UINTPTR_MAX - radius ? center + radius : UINTPTR_MAX;
+  if (local_minimum > *minimum)
+    *minimum = local_minimum;
+  if (local_maximum < *maximum)
+    *maximum = local_maximum;
+  return *minimum <= *maximum;
+}
 
 } // namespace
 
@@ -460,19 +482,55 @@ int relo_relocate(relo_ctx_t *ctx, bool branch) {
 #endif
     if (!use_simulated_address) {
       const uint32_t relocated_size = relocated_buffer->GetBufferSize();
-      const addr_t resume = ctx->origin->addr + ctx->origin->size;
-      addr_t preferred_start = branch ? resume - tail_branch_offset : ctx->origin->addr;
-      size_t search_range = kArm64DirectBranchRange - sizeof(arm64_inst_t);
-      if (!literal_loads.empty()) {
-        // Literal loads have a much smaller (+/-1 MiB) reach than B/BL.
-        // Centre near the first literal rather than accepting a distant
-        // trampoline which can never preserve its original instruction.
-        constexpr size_t kLiteralRange = size_t{1} << 20;
-        if (relocated_size + sizeof(arm64_inst_t) >= kLiteralRange)
+      const addr_t source_begin = ctx->origin->addr;
+      const addr_t source_end = source_begin + ctx->origin->size;
+      addr_t minimum_start = 0;
+      addr_t maximum_start = UINTPTR_MAX;
+      bool constrained = false;
+
+      if (branch) {
+        const addr_t resume = source_end;
+        if (!IntersectPcRelativeWindow(resume, tail_branch_offset, kArm64DirectBranchRange,
+                                       &minimum_start, &maximum_start))
           return -1;
-        preferred_start = literal_loads.front().target - literal_loads.front().offset;
-        search_range = kLiteralRange - relocated_size - sizeof(arm64_inst_t);
+        constrained = true;
       }
+      for (const auto &fixup : direct_branches) {
+        // A branch back into the stolen prologue is rebound to another offset
+        // in the relocated buffer, so it imposes no absolute-address window.
+        if (fixup.target >= source_begin && fixup.target < source_end)
+          continue;
+        if (!IntersectPcRelativeWindow(fixup.target, fixup.offset, kArm64DirectBranchRange,
+                                       &minimum_start, &maximum_start)) {
+          ERROR_LOG("[insn relocate] ARM64 direct-branch relocation windows do not intersect");
+          return -1;
+        }
+        constrained = true;
+      }
+      for (const auto &fixup : literal_loads) {
+        // Inline literals copied into the relocated buffer move with its base
+        // and therefore impose no absolute-address reachability constraint.
+        if (fixup.copied)
+          continue;
+        if (!IntersectPcRelativeWindow(fixup.target, fixup.offset, kArm64LiteralRange,
+                                       &minimum_start, &maximum_start)) {
+          ERROR_LOG("[insn relocate] ARM64 literal relocation windows do not intersect");
+          return -1;
+        }
+        constrained = true;
+      }
+
+      addr_t preferred_start = ctx->origin->addr;
+      size_t search_range = kArm64DirectBranchRange - sizeof(arm64_inst_t);
+      if (constrained) {
+        const addr_t span = maximum_start - minimum_start;
+        preferred_start = minimum_start + span / 2;
+        search_range = static_cast<size_t>(span / 2);
+      }
+      // The allocator clips an entire allocation to its search interval, so a
+      // window narrower than the relocation itself cannot be satisfied.
+      if (search_range < relocated_size)
+        return -1;
       auto *near_code =
           NearMemoryAllocator::SharedAllocator()->allocateNearExecMemory(relocated_size, preferred_start, search_range);
       if (near_code == nullptr) {

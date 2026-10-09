@@ -144,28 +144,6 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
     return unused_mem_start;
   };
 
-  addr_t unused_mem = 0;
-  auto regions = ProcessRuntimeUtility::GetProcessMemoryLayout();
-  for (size_t i = 0; i + 1 < regions.size(); i++) {
-    unused_mem = check_has_sufficient_memory_between_region(regions[i], regions[i + 1], size);
-    if (unused_mem == 0)
-      continue;
-    break;
-  }
-
-  if (!unused_mem)
-    return nullptr;
-
-  auto unused_arena_first_page_addr = (addr_t)ALIGN_FLOOR(unused_mem, OSMemory::PageSize());
-  auto unused_arena_end_page_addr = ALIGN_CEIL(unused_mem + size, OSMemory::PageSize());
-  auto unused_arena_size = unused_arena_end_page_addr - unused_arena_first_page_addr;
-  auto unused_arena_addr = unused_arena_first_page_addr;
-
-  if (OSMemory::Allocate(unused_arena_size, kNoAccess, (void *)unused_arena_addr) != (void *)unused_arena_addr) {
-    ERROR_LOG("[near memory allocator] allocate fixed page failed %p", unused_arena_addr);
-    return nullptr;
-  }
-
   auto register_near_arena = [&](addr_t arena_addr, size_t arena_size) -> MemoryArena * {
     MemoryArena *arena = nullptr;
     if (executable) {
@@ -185,18 +163,41 @@ MemBlock *NearMemoryAllocator::allocateNearBlockFromUnusedRegion(uint32_t size, 
     return arena;
   };
 
-  auto unused_arena = register_near_arena(unused_arena_addr, unused_arena_size);
-  if (!unused_arena)
-    return nullptr;
+  // /proc/self/maps is only a snapshot. Another thread (or the runtime's
+  // loader) can claim a candidate gap before MAP_FIXED_NOREPLACE reaches the
+  // kernel. A stale first gap must not make a valid near allocation fail: try
+  // every candidate in the requested window until one can actually be owned.
+  const auto regions = ProcessRuntimeUtility::GetProcessMemoryLayout();
+  for (size_t i = 0; i + 1 < regions.size(); i++) {
+    const addr_t unused_mem = check_has_sufficient_memory_between_region(regions[i], regions[i + 1], size);
+    if (unused_mem == 0)
+      continue;
 
-  // skip placeholder block
-  // FIXME: allocate the placeholder but mark it as freed
-  auto placeholder_block_size = unused_mem - unused_arena->cursor_addr;
-  if (placeholder_block_size)
-    delete unused_arena->allocMemBlock(placeholder_block_size);
+    const addr_t unused_arena_first_page_addr = (addr_t)ALIGN_FLOOR(unused_mem, OSMemory::PageSize());
+    const addr_t unused_arena_end_page_addr = ALIGN_CEIL(unused_mem + size, OSMemory::PageSize());
+    const size_t unused_arena_size = unused_arena_end_page_addr - unused_arena_first_page_addr;
+    const addr_t unused_arena_addr = unused_arena_first_page_addr;
 
-  auto block = unused_arena->allocMemBlock(size);
-  return block;
+    if (OSMemory::Allocate(unused_arena_size, kNoAccess, (void *)unused_arena_addr) !=
+        (void *)unused_arena_addr) {
+      DLOG(0, "[near memory allocator] fixed candidate raced %p, trying next gap", unused_arena_addr);
+      continue;
+    }
+
+    auto *unused_arena = register_near_arena(unused_arena_addr, unused_arena_size);
+    if (!unused_arena)
+      continue;
+
+    // skip placeholder block
+    // FIXME: allocate the placeholder but mark it as freed
+    auto placeholder_block_size = unused_mem - unused_arena->cursor_addr;
+    if (placeholder_block_size)
+      delete unused_arena->allocMemBlock(placeholder_block_size);
+
+    return unused_arena->allocMemBlock(size);
+  }
+
+  return nullptr;
 }
 
 MemBlock *NearMemoryAllocator::allocateNearBlock(uint32_t size, addr_t pos, size_t search_range, bool executable) {
